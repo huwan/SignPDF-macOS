@@ -1,6 +1,8 @@
 # SignPDF
 
-<img src="Resources/AppIcon.png" alt="SignPDF app icon" width="144">
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="SignPDF app icon" width="144">
+</p>
 
 SignPDF is a native macOS app for placing vector signatures onto PDF documents. It provides a visual editor for positioning and resizing signatures while keeping them sharp at any zoom level in the exported PDF.
 
