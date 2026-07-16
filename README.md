@@ -13,6 +13,8 @@ Everything runs locally. SignPDF does not upload documents or signatures to a se
 - Import one or more single-page PDF signature files.
 - Keep imported signatures in a local library for reuse across launches.
 - Remove saved signatures from the library when they are no longer needed.
+- Select a signature, preview it under the pointer, and click the exact page location where it belongs.
+- Double-click a signature to insert it in the center of the current page.
 - Add multiple signatures to any page.
 - Drag signatures to reposition them.
 - Resize signatures proportionally with the selection handle.
@@ -57,7 +59,7 @@ The installer writes directly to `/Applications` when it is writable. Otherwise,
 
 1. Open the PDF that needs to be signed.
 2. Select **Import Signature PDF** and choose one or more single-page vector PDF signatures. Imported signatures are copied into SignPDF's local Application Support directory and restored the next time the app opens.
-3. Click a signature in the right sidebar to add it to the current page.
+3. Click a signature in the right sidebar, then click the desired location on the page. A translucent vector preview follows the pointer; press Escape or right-click to cancel. Double-clicking a signature inserts it in the center instead.
 4. Drag the signature to position it.
 5. Drag the lower-right selection handle to resize it proportionally.
 6. Use the toolbar trash button or the signature context menu to delete it.

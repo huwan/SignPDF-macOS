@@ -28,7 +28,7 @@ struct SignatureAsset: Identifiable {
 
     var aspectRatio: CGFloat {
         let bounds = page.bounds(for: .mediaBox)
-        return bounds.height > 0 ? bounds.width / bounds.height : 1
+        return bounds.width > 0 && bounds.height > 0 ? bounds.width / bounds.height : 1
     }
 }
 
@@ -76,6 +76,7 @@ final class DocumentModel: ObservableObject {
     @Published var assets: [SignatureAsset] = []
     @Published var placements: [SignaturePlacement] = []
     @Published var selectedPlacementID: UUID?
+    @Published var pendingSignatureAssetID: UUID?
     @Published var zoom: CGFloat = 1
     @Published var alertMessage: String?
 
@@ -98,6 +99,11 @@ final class DocumentModel: ObservableObject {
 
     var libraryAssets: [SignatureAsset] {
         assets.filter(\.isInLibrary)
+    }
+
+    var pendingSignatureAsset: SignatureAsset? {
+        guard let pendingSignatureAssetID else { return nil }
+        return assets.first { $0.id == pendingSignatureAssetID }
     }
 
     var currentPDFPage: PDFPage? {
@@ -129,6 +135,7 @@ final class DocumentModel: ObservableObject {
         placements = []
         purgeUnusedDetachedAssets()
         selectedPlacementID = nil
+        pendingSignatureAssetID = nil
         zoom = 1
     }
 
@@ -164,20 +171,57 @@ final class DocumentModel: ObservableObject {
         }
     }
 
+    func beginPlacingSignature(_ asset: SignatureAsset) {
+        guard document != nil, assets.contains(where: { $0.id == asset.id }) else { return }
+        pendingSignatureAssetID = asset.id
+        selectedPlacementID = nil
+    }
+
+    func cancelSignaturePlacement() {
+        pendingSignatureAssetID = nil
+    }
+
+    func placePendingSignature(at pagePoint: CGPoint) {
+        guard let asset = pendingSignatureAsset else {
+            pendingSignatureAssetID = nil
+            return
+        }
+        addSignature(asset, centeredAt: pagePoint)
+    }
+
     func addSignature(_ asset: SignatureAsset) {
         guard document != nil else { return }
         let pageSize = currentPageSize
-        let width = min(150.0, pageSize.width * 0.35)
-        let height = width / asset.aspectRatio
-        let rect = CGRect(
-            x: (pageSize.width - width) / 2,
-            y: (pageSize.height - height) / 2,
-            width: width,
-            height: height
+        addSignature(
+            asset,
+            centeredAt: CGPoint(x: pageSize.width / 2, y: pageSize.height / 2)
         )
+    }
+
+    func addSignature(_ asset: SignatureAsset, centeredAt pagePoint: CGPoint) {
+        guard document != nil else { return }
+        let rect = proposedSignatureRect(for: asset, centeredAt: pagePoint)
         let placement = SignaturePlacement(assetID: asset.id, pageIndex: currentPage, rect: rect)
         placements.append(placement)
         selectedPlacementID = placement.id
+        pendingSignatureAssetID = nil
+    }
+
+    func proposedSignatureRect(for asset: SignatureAsset, centeredAt pagePoint: CGPoint) -> CGRect {
+        let pageSize = currentPageSize
+        let width = min(
+            150.0,
+            pageSize.width * 0.35,
+            pageSize.height * 0.35 * max(asset.aspectRatio, 0.001)
+        )
+        let height = width / asset.aspectRatio
+        let rect = CGRect(
+            x: pagePoint.x - width / 2,
+            y: pagePoint.y - height / 2,
+            width: width,
+            height: height
+        )
+        return PlacementGeometry.clamped(rect, to: pageSize)
     }
 
     func asset(for placement: SignaturePlacement) -> SignatureAsset? {
@@ -221,6 +265,10 @@ final class DocumentModel: ObservableObject {
             }
 
             try signatureLibrary.delete(asset)
+
+            if pendingSignatureAssetID == asset.id {
+                pendingSignatureAssetID = nil
+            }
 
             if let index = assets.firstIndex(where: { $0.id == asset.id }),
                let detachedAsset {

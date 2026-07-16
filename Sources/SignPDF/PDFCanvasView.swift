@@ -11,6 +11,7 @@ struct PDFCanvasRepresentable: NSViewRepresentable {
 
     func updateNSView(_ view: PDFCanvasView, context: Context) {
         view.model = model
+        view.synchronizeInteractionState()
         view.needsDisplay = true
     }
 }
@@ -20,6 +21,35 @@ final class PDFCanvasView: NSView {
     private var dragStart: CGPoint?
     private var originalPlacement: SignaturePlacement?
     private var isResizing = false
+    private var hoverPoint: CGPoint?
+    private var mouseTrackingArea: NSTrackingArea?
+    private var lastPendingSignatureAssetID: UUID?
+
+    private static let signaturePlacementCursor: NSCursor = {
+        let size = NSSize(width: 36, height: 34)
+        let image = NSImage(size: size, flipped: false) { _ in
+            NSCursor.arrow.image.draw(
+                in: NSRect(x: 0, y: 15, width: 19, height: 19),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
+            let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+            if let signature = NSImage(
+                systemSymbolName: "signature",
+                accessibilityDescription: "放置签名"
+            )?.withSymbolConfiguration(configuration) {
+                signature.draw(
+                    in: NSRect(x: 13, y: 0, width: 22, height: 17),
+                    from: .zero,
+                    operation: .sourceOver,
+                    fraction: 1
+                )
+            }
+            return true
+        }
+        return NSCursor(image: image, hotSpot: NSPoint(x: 2, y: 2))
+    }()
 
     init(model: DocumentModel) {
         self.model = model
@@ -30,6 +60,38 @@ final class PDFCanvasView: NSView {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let mouseTrackingArea {
+            removeTrackingArea(mouseTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        mouseTrackingArea = trackingArea
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(
+            bounds,
+            cursor: model.pendingSignatureAssetID == nil ? .arrow : Self.signaturePlacementCursor
+        )
+    }
+
+    func synchronizeInteractionState() {
+        let pendingID = model.pendingSignatureAssetID
+        guard lastPendingSignatureAssetID != pendingID else { return }
+        lastPendingSignatureAssetID = pendingID
+        hoverPoint = nil
+        window?.invalidateCursorRects(for: self)
+        needsDisplay = true
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         let sizeChanged = frame.size != newSize
@@ -55,6 +117,8 @@ final class PDFCanvasView: NSView {
         NSColor.white.setFill()
         bounds.fill()
 
+        let preview = pendingSignaturePreview
+
         context.saveGState()
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
@@ -69,10 +133,31 @@ final class PDFCanvasView: NSView {
             )
             PDFExporter.draw(asset.page, in: target, context: context)
         }
+
+        if let preview {
+            let target = CanvasGeometry.drawingRect(
+                for: preview.rect,
+                pageSize: model.currentPageSize,
+                canvasSize: bounds.size
+            )
+            context.saveGState()
+            context.setAlpha(0.55)
+            PDFExporter.draw(preview.asset.page, in: target, context: context)
+            context.restoreGState()
+        }
         context.restoreGState()
 
         if let selected = selectedPlacement {
             drawSelection(visualRect(for: selected))
+        }
+        if let preview {
+            drawPlacementPreview(
+                CanvasGeometry.visualRect(
+                    for: preview.rect,
+                    pageSize: model.currentPageSize,
+                    canvasSize: bounds.size
+                )
+            )
         }
     }
 
@@ -82,6 +167,17 @@ final class PDFCanvasView: NSView {
 
     private var selectedPlacement: SignaturePlacement? {
         currentPlacements.first { $0.id == model.selectedPlacementID }
+    }
+
+    private var pendingSignaturePreview: (asset: SignatureAsset, rect: CGRect)? {
+        guard let asset = model.pendingSignatureAsset,
+              let hoverPoint,
+              let pagePoint = CanvasGeometry.pdfPoint(
+                for: hoverPoint,
+                pageSize: model.currentPageSize,
+                canvasSize: bounds.size
+              ) else { return nil }
+        return (asset, model.proposedSignatureRect(for: asset, centeredAt: pagePoint))
     }
 
     private func visualRect(for placement: SignaturePlacement) -> CGRect {
@@ -105,9 +201,57 @@ final class PDFCanvasView: NSView {
         NSBezierPath(rect: handle).stroke()
     }
 
+    private func drawPlacementPreview(_ rect: CGRect) {
+        NSColor.controlAccentColor.withAlphaComponent(0.8).setStroke()
+        let path = NSBezierPath(roundedRect: rect.insetBy(dx: -2, dy: -2), xRadius: 3, yRadius: 3)
+        path.lineWidth = 1.5
+        path.setLineDash([5, 3], count: 2, phase: 0)
+        path.stroke()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        updateHoverPoint(with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateHoverPoint(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard hoverPoint != nil else { return }
+        hoverPoint = nil
+        needsDisplay = true
+    }
+
+    private func updateHoverPoint(with event: NSEvent) {
+        guard model.pendingSignatureAssetID != nil else {
+            hoverPoint = nil
+            return
+        }
+        hoverPoint = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+
+        if model.pendingSignatureAssetID != nil {
+            if event.modifierFlags.contains(.control) {
+                cancelSignaturePlacement()
+                return
+            }
+            guard let pagePoint = CanvasGeometry.pdfPoint(
+                for: point,
+                pageSize: model.currentPageSize,
+                canvasSize: bounds.size
+            ) else { return }
+            model.placePendingSignature(at: pagePoint)
+            hoverPoint = nil
+            synchronizeInteractionState()
+            needsDisplay = true
+            return
+        }
 
         if let selected = selectedPlacement {
             let rect = visualRect(for: selected)
@@ -163,6 +307,14 @@ final class PDFCanvasView: NSView {
         resetDrag()
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        if model.pendingSignatureAssetID != nil {
+            cancelSignaturePlacement()
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+
     private func resetDrag() {
         dragStart = nil
         originalPlacement = nil
@@ -170,6 +322,10 @@ final class PDFCanvasView: NSView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        if model.pendingSignatureAssetID != nil {
+            cancelSignaturePlacement()
+            return nil
+        }
         let point = convert(event.locationInWindow, from: nil)
         guard let hit = currentPlacements.reversed().first(where: { visualRect(for: $0).contains(point) }) else {
             return nil
@@ -191,6 +347,10 @@ final class PDFCanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, model.pendingSignatureAssetID != nil {
+            cancelSignaturePlacement()
+            return
+        }
         guard let id = model.selectedPlacementID,
               let index = model.placements.firstIndex(where: { $0.id == id }) else {
             super.keyDown(with: event)
@@ -208,6 +368,21 @@ final class PDFCanvasView: NSView {
             return
         }
         model.placements[index].rect = PlacementGeometry.clamped(rect, to: model.currentPageSize)
+        needsDisplay = true
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if model.pendingSignatureAssetID != nil {
+            cancelSignaturePlacement()
+        } else {
+            super.cancelOperation(sender)
+        }
+    }
+
+    private func cancelSignaturePlacement() {
+        model.cancelSignaturePlacement()
+        hoverPoint = nil
+        synchronizeInteractionState()
         needsDisplay = true
     }
 }
@@ -252,6 +427,29 @@ enum CanvasGeometry {
             y: canvasSize.height - drawingRect.maxY,
             width: drawingRect.width,
             height: drawingRect.height
+        )
+    }
+
+    static func pdfPoint(
+        for visualPoint: CGPoint,
+        pageSize: CGSize,
+        canvasSize: CGSize
+    ) -> CGPoint? {
+        let scale = scale(pageSize: pageSize, canvasSize: canvasSize)
+        guard scale > 0 else { return nil }
+        let drawnPageSize = CGSize(width: pageSize.width * scale, height: pageSize.height * scale)
+        let offset = CGPoint(
+            x: (canvasSize.width - drawnPageSize.width) / 2,
+            y: (canvasSize.height - drawnPageSize.height) / 2
+        )
+        let drawingPoint = CGPoint(x: visualPoint.x, y: canvasSize.height - visualPoint.y)
+        guard drawingPoint.x >= offset.x,
+              drawingPoint.x <= offset.x + drawnPageSize.width,
+              drawingPoint.y >= offset.y,
+              drawingPoint.y <= offset.y + drawnPageSize.height else { return nil }
+        return CGPoint(
+            x: (drawingPoint.x - offset.x) / scale,
+            y: (drawingPoint.y - offset.y) / scale
         )
     }
 }

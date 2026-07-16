@@ -1,3 +1,4 @@
+import AppKit
 import PDFKit
 import SwiftUI
 
@@ -21,6 +22,9 @@ struct ContentView: View {
         } message: {
             Text(model.alertMessage ?? "")
         }
+        .onExitCommand {
+            model.cancelSignaturePlacement()
+        }
     }
 
     private var alertBinding: Binding<Bool> {
@@ -42,14 +46,31 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
             }
         } else {
-            ScrollView([.horizontal, .vertical]) {
-                PDFCanvasRepresentable(model: model)
-                    .frame(
-                        width: model.currentPageSize.width * model.zoom,
-                        height: model.currentPageSize.height * model.zoom
+            ZStack(alignment: .top) {
+                ScrollView([.horizontal, .vertical]) {
+                    PDFCanvasRepresentable(model: model)
+                        .frame(
+                            width: model.currentPageSize.width * model.zoom,
+                            height: model.currentPageSize.height * model.zoom
+                        )
+                        .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+                        .padding(36)
+                }
+
+                if let asset = model.pendingSignatureAsset {
+                    Label(
+                        "在页面上单击放置“\(asset.name)”；按 Esc 或右键取消",
+                        systemImage: "cursorarrow.click"
                     )
-                    .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
-                    .padding(36)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(radius: 3, y: 1)
+                    .padding(.top, 10)
+                    .allowsHitTesting(false)
+                }
             }
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.65))
         }
@@ -116,7 +137,10 @@ private struct PageSidebar: View {
             }
         }
         .navigationTitle("页面")
-        .onChange(of: model.currentPage) { _ in model.selectedPlacementID = nil }
+        .onChange(of: model.currentPage) { _ in
+            model.selectedPlacementID = nil
+            model.cancelSignaturePlacement()
+        }
     }
 }
 
@@ -140,7 +164,7 @@ private struct SignatureSidebar: View {
                     LazyVStack(spacing: 10) {
                         ForEach(model.libraryAssets) { asset in
                             ZStack(alignment: .topTrailing) {
-                                Button { model.addSignature(asset) } label: {
+                                Button { activate(asset) } label: {
                                     VStack(spacing: 8) {
                                         PDFPageVectorPreview(page: asset.page)
                                             .frame(maxWidth: .infinity)
@@ -150,12 +174,30 @@ private struct SignatureSidebar: View {
                                     .frame(maxWidth: .infinity)
                                     .padding(10)
                                     .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(
+                                                model.pendingSignatureAssetID == asset.id
+                                                    ? Color.accentColor
+                                                    : Color.clear,
+                                                lineWidth: 2
+                                            )
+                                    }
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(model.document == nil)
-                                .help(model.document == nil ? "请先打开一份 PDF" : "添加到当前页")
+                                .help(
+                                    model.document == nil
+                                        ? "请先打开一份 PDF"
+                                        : "单击后在页面选择位置；双击插入页面中央"
+                                )
 
                                 Menu {
+                                    Button("插入页面中央", systemImage: "rectangle") {
+                                        model.addSignature(asset)
+                                    }
+                                    .disabled(model.document == nil)
+                                    Divider()
                                     Button("从签名库删除…", role: .destructive) {
                                         assetPendingDeletion = asset
                                     }
@@ -169,6 +211,11 @@ private struct SignatureSidebar: View {
                                 .padding(7)
                             }
                             .contextMenu {
+                                Button("插入页面中央") {
+                                    model.addSignature(asset)
+                                }
+                                .disabled(model.document == nil)
+                                Divider()
                                 Button("从签名库删除…", role: .destructive) {
                                     assetPendingDeletion = asset
                                 }
@@ -215,6 +262,14 @@ private struct SignatureSidebar: View {
             return "“\(asset.name)”会从本机签名库中永久删除；当前文档中已经插入的 \(placementCount) 个实例会保留。"
         }
         return "“\(asset.name)”会从本机签名库中永久删除。"
+    }
+
+    private func activate(_ asset: SignatureAsset) {
+        if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+            model.addSignature(asset)
+        } else {
+            model.beginPlacingSignature(asset)
+        }
     }
 }
 

@@ -60,6 +60,41 @@ final class SignPDFTests: XCTestCase {
         XCTAssertEqual(at150.height, at100.height * 1.5)
     }
 
+    func testCanvasGeometryConvertsVisualPointsBackToPDFCoordinates() throws {
+        let pageSize = CGSize(width: 600, height: 800)
+        let canvasSize = CGSize(width: 1_000, height: 1_200)
+
+        let converted = try XCTUnwrap(CanvasGeometry.pdfPoint(
+            for: CGPoint(x: 200, y: 1_020),
+            pageSize: pageSize,
+            canvasSize: canvasSize
+        ))
+        XCTAssertEqual(converted.x, 100, accuracy: 0.001)
+        XCTAssertEqual(converted.y, 120, accuracy: 0.001)
+
+        let topLeft = try XCTUnwrap(CanvasGeometry.pdfPoint(
+            for: CGPoint(x: 50, y: 0),
+            pageSize: pageSize,
+            canvasSize: canvasSize
+        ))
+        XCTAssertEqual(topLeft.x, 0, accuracy: 0.001)
+        XCTAssertEqual(topLeft.y, 800, accuracy: 0.001)
+
+        let bottomRight = try XCTUnwrap(CanvasGeometry.pdfPoint(
+            for: CGPoint(x: 950, y: 1_200),
+            pageSize: pageSize,
+            canvasSize: canvasSize
+        ))
+        XCTAssertEqual(bottomRight.x, 600, accuracy: 0.001)
+        XCTAssertEqual(bottomRight.y, 0, accuracy: 0.001)
+
+        XCTAssertNil(CanvasGeometry.pdfPoint(
+            for: CGPoint(x: 20, y: 600),
+            pageSize: pageSize,
+            canvasSize: canvasSize
+        ))
+    }
+
     func testPDFDrawingGeometryUpscalesBeyondOriginalSize() {
         let sourceSize = CGSize(width: 600, height: 800)
         let target = CGRect(x: 10, y: 20, width: 900, height: 1200)
@@ -258,6 +293,70 @@ final class SignPDFTests: XCTestCase {
         let secondLoad = try library.load()
         XCTAssertEqual(secondLoad.assets.count, 1)
         XCTAssertEqual(secondLoad.skippedItemCount, 0)
+    }
+
+    @MainActor
+    func testSignaturePlacementModeIsOneShotAndPreservesAspectRatioAtPageEdges() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-library-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "placement-document")
+        let signatureURL = temporaryPDFURL(named: "placement-signature")
+        let tallSignatureURL = temporaryPDFURL(named: "tall-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL, tallSignatureURL]) }
+
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 600, height: 800))
+        try makeVectorSignaturePDF(at: signatureURL)
+        try makeSourcePDF(at: tallSignatureURL, pageCount: 1, pageSize: CGSize(width: 100, height: 1_000))
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let asset = try XCTUnwrap(model.libraryAssets.first)
+
+        model.beginPlacingSignature(asset)
+        XCTAssertEqual(model.pendingSignatureAssetID, asset.id)
+        XCTAssertTrue(model.placements.isEmpty)
+
+        let proposed = model.proposedSignatureRect(
+            for: asset,
+            centeredAt: CGPoint(x: 595, y: 5)
+        )
+        model.placePendingSignature(at: CGPoint(x: 595, y: 5))
+
+        XCTAssertEqual(model.placements.count, 1)
+        XCTAssertEqual(model.placements[0].rect, proposed)
+        XCTAssertEqual(model.placements[0].rect.maxX, 600, accuracy: 0.001)
+        XCTAssertEqual(model.placements[0].rect.minY, 0, accuracy: 0.001)
+        XCTAssertEqual(
+            model.placements[0].rect.width / model.placements[0].rect.height,
+            asset.aspectRatio,
+            accuracy: 0.001
+        )
+        XCTAssertNil(model.pendingSignatureAssetID)
+        XCTAssertEqual(model.selectedPlacementID, model.placements[0].id)
+
+        model.beginPlacingSignature(asset)
+        model.cancelSignaturePlacement()
+        XCTAssertEqual(model.placements.count, 1)
+        XCTAssertNil(model.pendingSignatureAssetID)
+
+        let tallDocument = try XCTUnwrap(PDFDocument(url: tallSignatureURL))
+        let tallAsset = try XCTUnwrap(SignatureAsset(
+            name: "Tall",
+            url: tallSignatureURL,
+            document: tallDocument
+        ))
+        let tallRect = model.proposedSignatureRect(
+            for: tallAsset,
+            centeredAt: CGPoint(x: 300, y: 400)
+        )
+        XCTAssertLessThanOrEqual(tallRect.height, 800 * 0.35 + 0.001)
+        XCTAssertEqual(tallRect.width / tallRect.height, tallAsset.aspectRatio, accuracy: 0.001)
+
+        model.beginPlacingSignature(asset)
+        model.addSignature(asset)
+        XCTAssertEqual(model.placements.count, 2)
+        XCTAssertNil(model.pendingSignatureAssetID)
     }
 
     private func makeSourcePDF(at url: URL, pageCount: Int, pageSize: CGSize) throws {
