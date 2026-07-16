@@ -25,6 +25,7 @@ Everything runs locally. SignPDF does not upload documents or signatures to a se
 - Preserve vector page content and vector signature artwork during export.
 - Flatten existing annotation and form appearances so filled-in text remains visible.
 - Export beside the source PDF by default as `<name>-signed.pdf`.
+- Warn before closing, quitting, or opening another PDF when signature changes have not been exported.
 
 ## Requirements
 
@@ -64,6 +65,8 @@ The installer writes directly to `/Applications` when it is writable. Otherwise,
 5. Drag the lower-right selection handle to resize it proportionally.
 6. Use the toolbar trash button or the signature context menu to delete it.
 7. Select **Export** to create the signed PDF.
+
+If the signature layout has changed since the PDF was opened or last exported, SignPDF asks whether to export before closing the window, quitting the app, or opening another PDF. Choosing **Cancel** keeps the current document open.
 
 To remove a saved signature, use the ellipsis menu on its card in the signature library. Existing instances in the document currently being edited remain in place and can still be removed individually with the toolbar trash button or context menu.
 

@@ -359,6 +359,53 @@ final class SignPDFTests: XCTestCase {
         XCTAssertNil(model.pendingSignatureAssetID)
     }
 
+    @MainActor
+    func testUnsavedChangesFollowTheEffectiveSignatureLayout() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-library-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "dirty-state-document")
+        let signatureURL = temporaryPDFURL(named: "dirty-state-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 600, height: 800))
+        try makeVectorSignaturePDF(at: signatureURL)
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let asset = try XCTUnwrap(model.libraryAssets.first)
+
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        model.addSignature(asset, centeredAt: CGPoint(x: 300, y: 400))
+        XCTAssertTrue(model.hasUnsavedChanges)
+
+        model.markCurrentSignatureLayoutAsHandled()
+        XCTAssertFalse(model.hasUnsavedChanges)
+        let handledRect = model.placements[0].rect
+
+        model.placements[0].rect.origin.x += 10
+        XCTAssertTrue(model.hasUnsavedChanges)
+        model.placements[0].rect = handledRect
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        model.addSignature(asset, centeredAt: CGPoint(x: 100, y: 100))
+        XCTAssertTrue(model.hasUnsavedChanges)
+        model.deletePlacement(id: model.placements[1].id)
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        model.deletePlacement(id: model.placements[0].id)
+        XCTAssertTrue(model.hasUnsavedChanges)
+        model.addSignature(
+            asset,
+            centeredAt: CGPoint(x: handledRect.midX, y: handledRect.midY)
+        )
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        model.open(url: documentURL)
+        XCTAssertFalse(model.hasUnsavedChanges)
+    }
+
     private func makeSourcePDF(at url: URL, pageCount: Int, pageSize: CGSize) throws {
         var mediaBox = CGRect(origin: .zero, size: pageSize)
         let consumer = try XCTUnwrap(CGDataConsumer(url: url as CFURL))

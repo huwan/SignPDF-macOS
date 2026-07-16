@@ -46,6 +46,27 @@ struct SignaturePlacement: Identifiable, Equatable {
     }
 }
 
+private struct SignatureLayoutItem: Equatable {
+    let assetID: UUID
+    let pageIndex: Int
+    let rect: CGRect
+
+    init(_ placement: SignaturePlacement) {
+        assetID = placement.assetID
+        pageIndex = placement.pageIndex
+        rect = CGRect(
+            x: Self.normalized(placement.rect.origin.x),
+            y: Self.normalized(placement.rect.origin.y),
+            width: Self.normalized(placement.rect.width),
+            height: Self.normalized(placement.rect.height)
+        )
+    }
+
+    private static func normalized(_ value: CGFloat) -> CGFloat {
+        (value * 1_000).rounded() / 1_000
+    }
+}
+
 enum SignPDFError: LocalizedError {
     case cannotReadPDF(String)
     case signatureMustBeSinglePage(String)
@@ -79,6 +100,7 @@ final class DocumentModel: ObservableObject {
     @Published var pendingSignatureAssetID: UUID?
     @Published var zoom: CGFloat = 1
     @Published var alertMessage: String?
+    @Published private var handledSignatureLayout: [SignatureLayoutItem] = []
 
     private let signatureLibrary: SignatureLibrary
 
@@ -96,6 +118,10 @@ final class DocumentModel: ObservableObject {
     }
 
     var pageCount: Int { document?.pageCount ?? 0 }
+
+    var hasUnsavedChanges: Bool {
+        document != nil && currentSignatureLayout != handledSignatureLayout
+    }
 
     var libraryAssets: [SignatureAsset] {
         assets.filter(\.isInLibrary)
@@ -121,7 +147,7 @@ final class DocumentModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.message = "选择需要签名的 PDF"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        open(url: url)
+        requestOpen(url: url)
     }
 
     func open(url: URL) {
@@ -129,14 +155,58 @@ final class DocumentModel: ObservableObject {
             present(SignPDFError.cannotReadPDF(url.lastPathComponent))
             return
         }
+        replaceDocument(with: pdf, sourceURL: url)
+    }
+
+    func requestOpen(url: URL) {
+        guard let pdf = PDFDocument(url: url) else {
+            present(SignPDFError.cannotReadPDF(url.lastPathComponent))
+            return
+        }
+        guard resolveUnsavedChanges() else { return }
+        replaceDocument(with: pdf, sourceURL: url)
+    }
+
+    private func replaceDocument(with pdf: PDFDocument, sourceURL: URL) {
         document = pdf
-        sourceURL = url
+        self.sourceURL = sourceURL
         currentPage = 0
         placements = []
+        handledSignatureLayout = []
         purgeUnusedDetachedAssets()
         selectedPlacementID = nil
         pendingSignatureAssetID = nil
         zoom = 1
+    }
+
+    @discardableResult
+    func resolveUnsavedChanges() -> Bool {
+        guard hasUnsavedChanges else { return true }
+
+        let documentName = sourceURL?.lastPathComponent ?? "当前 PDF"
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "要导出对“\(documentName)”所做的更改吗？"
+        alert.informativeText = "如果不导出，添加、移动或删除的签名将会丢失。"
+        alert.addButton(withTitle: "导出…")
+        let discardButton = alert.addButton(withTitle: "不导出")
+        discardButton.hasDestructiveAction = true
+        let cancelButton = alert.addButton(withTitle: "取消")
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return exportDocument()
+        case .alertSecondButtonReturn:
+            markCurrentSignatureLayoutAsHandled()
+            return true
+        default:
+            return false
+        }
+    }
+
+    func markCurrentSignatureLayoutAsHandled() {
+        handledSignatureLayout = currentSignatureLayout
     }
 
     func importSignatures() {
@@ -286,20 +356,28 @@ final class DocumentModel: ObservableObject {
         assets.removeAll { !$0.isInLibrary && !usedAssetIDs.contains($0.id) }
     }
 
-    func exportDocument() {
-        guard let sourceURL else { return }
+    @discardableResult
+    func exportDocument() -> Bool {
+        guard let sourceURL else { return false }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
         panel.directoryURL = sourceURL.deletingLastPathComponent()
         panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-signed.pdf"
         panel.message = "导出会保留原页面和签名的矢量内容"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        guard panel.runModal() == .OK, let destination = panel.url else { return false }
         do {
             try PDFExporter.export(document: document, placements: placements, assets: assets, to: destination)
+            markCurrentSignatureLayoutAsHandled()
+            return true
         } catch {
             present(error)
+            return false
         }
+    }
+
+    private var currentSignatureLayout: [SignatureLayoutItem] {
+        placements.map(SignatureLayoutItem.init)
     }
 
     func present(_ error: Error) {
