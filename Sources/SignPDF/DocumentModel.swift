@@ -46,6 +46,11 @@ struct SignaturePlacement: Identifiable, Equatable {
     }
 }
 
+struct PageNavigationRequest: Equatable {
+    let id = UUID()
+    let pageIndex: Int
+}
+
 enum ZoomGeometry {
     static let minimum: CGFloat = 0.35
     static let maximum: CGFloat = 3
@@ -118,9 +123,14 @@ final class DocumentModel: ObservableObject {
     @Published var pendingSignatureAssetID: UUID?
     @Published var zoom: CGFloat = 1
     @Published var alertMessage: String?
+    @Published private(set) var pageNavigationRequest: PageNavigationRequest?
     @Published private var handledSignatureLayout: [SignatureLayoutItem] = []
 
     private let signatureLibrary: SignatureLibrary
+    private(set) var pageSizes: [CGSize] = []
+    private(set) var maximumPageWidth: CGFloat = 595
+
+    private static let fallbackPageSize = CGSize(width: 595, height: 842)
 
     init(signatureLibrary: SignatureLibrary = SignatureLibrary()) {
         self.signatureLibrary = signatureLibrary
@@ -151,12 +161,33 @@ final class DocumentModel: ObservableObject {
     }
 
     var currentPDFPage: PDFPage? {
-        guard let document, currentPage >= 0, currentPage < document.pageCount else { return nil }
-        return document.page(at: currentPage)
+        pdfPage(at: currentPage)
     }
 
     var currentPageSize: CGSize {
-        currentPDFPage?.bounds(for: .mediaBox).size ?? CGSize(width: 595, height: 842)
+        pageSize(at: currentPage)
+    }
+
+    func pdfPage(at pageIndex: Int) -> PDFPage? {
+        guard let document, pageIndex >= 0, pageIndex < document.pageCount else { return nil }
+        return document.page(at: pageIndex)
+    }
+
+    func pageSize(at pageIndex: Int) -> CGSize {
+        guard pageSizes.indices.contains(pageIndex) else { return Self.fallbackPageSize }
+        return pageSizes[pageIndex]
+    }
+
+    func requestPageNavigation(to pageIndex: Int) {
+        guard pageIndex >= 0, pageIndex < pageCount else { return }
+        currentPage = pageIndex
+        selectedPlacementID = nil
+        pageNavigationRequest = PageNavigationRequest(pageIndex: pageIndex)
+    }
+
+    func updateCurrentPageFromViewport(_ pageIndex: Int) {
+        guard pageIndex >= 0, pageIndex < pageCount, pageIndex != currentPage else { return }
+        currentPage = pageIndex
     }
 
     func openDocument() {
@@ -186,6 +217,14 @@ final class DocumentModel: ObservableObject {
     }
 
     private func replaceDocument(with pdf: PDFDocument, sourceURL: URL) {
+        pageSizes = (0..<pdf.pageCount).map { pageIndex in
+            guard let page = pdf.page(at: pageIndex) else { return Self.fallbackPageSize }
+            let size = page.bounds(for: .mediaBox).size
+            guard size.width > 0, size.height > 0,
+                  size.width.isFinite, size.height.isFinite else { return Self.fallbackPageSize }
+            return size
+        }
+        maximumPageWidth = pageSizes.map(\.width).max() ?? Self.fallbackPageSize.width
         document = pdf
         self.sourceURL = sourceURL
         currentPage = 0
@@ -195,6 +234,7 @@ final class DocumentModel: ObservableObject {
         selectedPlacementID = nil
         pendingSignatureAssetID = nil
         zoom = 1
+        pageNavigationRequest = PageNavigationRequest(pageIndex: 0)
     }
 
     @discardableResult
@@ -270,11 +310,15 @@ final class DocumentModel: ObservableObject {
     }
 
     func placePendingSignature(at pagePoint: CGPoint) {
+        placePendingSignature(at: pagePoint, onPage: currentPage)
+    }
+
+    func placePendingSignature(at pagePoint: CGPoint, onPage pageIndex: Int) {
         guard let asset = pendingSignatureAsset else {
             pendingSignatureAssetID = nil
             return
         }
-        addSignature(asset, centeredAt: pagePoint)
+        addSignature(asset, centeredAt: pagePoint, onPage: pageIndex)
     }
 
     func addSignature(_ asset: SignatureAsset) {
@@ -282,21 +326,35 @@ final class DocumentModel: ObservableObject {
         let pageSize = currentPageSize
         addSignature(
             asset,
-            centeredAt: CGPoint(x: pageSize.width / 2, y: pageSize.height / 2)
+            centeredAt: CGPoint(x: pageSize.width / 2, y: pageSize.height / 2),
+            onPage: currentPage
         )
     }
 
     func addSignature(_ asset: SignatureAsset, centeredAt pagePoint: CGPoint) {
-        guard document != nil else { return }
-        let rect = proposedSignatureRect(for: asset, centeredAt: pagePoint)
-        let placement = SignaturePlacement(assetID: asset.id, pageIndex: currentPage, rect: rect)
+        addSignature(asset, centeredAt: pagePoint, onPage: currentPage)
+    }
+
+    func addSignature(_ asset: SignatureAsset, centeredAt pagePoint: CGPoint, onPage pageIndex: Int) {
+        guard pageIndex >= 0, pageIndex < pageCount else { return }
+        let rect = proposedSignatureRect(for: asset, centeredAt: pagePoint, onPage: pageIndex)
+        let placement = SignaturePlacement(assetID: asset.id, pageIndex: pageIndex, rect: rect)
         placements.append(placement)
+        currentPage = pageIndex
         selectedPlacementID = placement.id
         pendingSignatureAssetID = nil
     }
 
     func proposedSignatureRect(for asset: SignatureAsset, centeredAt pagePoint: CGPoint) -> CGRect {
-        let pageSize = currentPageSize
+        proposedSignatureRect(for: asset, centeredAt: pagePoint, onPage: currentPage)
+    }
+
+    func proposedSignatureRect(
+        for asset: SignatureAsset,
+        centeredAt pagePoint: CGPoint,
+        onPage pageIndex: Int
+    ) -> CGRect {
+        let pageSize = pageSize(at: pageIndex)
         let width = min(
             150.0,
             pageSize.width * 0.35,

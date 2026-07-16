@@ -60,18 +60,55 @@ struct ContentView: View {
                 Button("打开 PDF…") { model.openDocument() }
                     .buttonStyle(.borderedProminent)
             }
-        } else {
+        } else if let document = model.document {
             ZStack(alignment: .top) {
-                ScrollView([.horizontal, .vertical]) {
-                    PDFCanvasRepresentable(model: model)
-                        .frame(
-                            width: model.currentPageSize.width * effectiveZoom,
-                            height: model.currentPageSize.height * effectiveZoom
-                        )
-                        .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
-                        .padding(36)
+                GeometryReader { viewport in
+                    ScrollViewReader { reader in
+                        ScrollView([.horizontal, .vertical]) {
+                            LazyVStack(spacing: 0) {
+                                ForEach(0..<document.pageCount, id: \.self) { pageIndex in
+                                    let pageSize = model.pageSize(at: pageIndex)
+                                    PDFCanvasRepresentable(model: model, pageIndex: pageIndex)
+                                        .frame(
+                                            width: pageSize.width * effectiveZoom,
+                                            height: pageSize.height * effectiveZoom
+                                        )
+                                        .background(PageFrameReporter(pageIndex: pageIndex))
+                                        .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+                                        .padding(.vertical, ContinuousScrollLayout.pageVerticalPadding)
+                                        .id(pageIndex)
+                                }
+                            }
+                            .frame(
+                                width: ContinuousScrollLayout.contentWidth(
+                                    viewportWidth: viewport.size.width,
+                                    maximumPageWidth: model.maximumPageWidth,
+                                    zoom: effectiveZoom
+                                )
+                            )
+                            .padding(.vertical, ContinuousScrollLayout.documentVerticalPadding)
+                        }
+                        .coordinateSpace(name: ContinuousScrollLayout.coordinateSpaceName)
+                        .simultaneousGesture(pinchGesture)
+                        .onPreferenceChange(PageFramePreferenceKey.self) { pageFrames in
+                            let viewportRect = CGRect(origin: .zero, size: viewport.size)
+                            guard let pageIndex = ContinuousPageGeometry.activePageIndex(
+                                viewport: viewportRect,
+                                pageFrames: pageFrames,
+                                pageCount: document.pageCount,
+                                keeping: model.currentPage
+                            ) else { return }
+                            model.updateCurrentPageFromViewport(pageIndex)
+                        }
+                        .onChange(of: model.pageNavigationRequest) { request in
+                            guard let request else { return }
+                            let pageHeight = model.pageSize(at: request.pageIndex).height * effectiveZoom
+                            let anchor: UnitPoint = pageHeight < viewport.size.height ? .center : .top
+                            reader.scrollTo(request.pageIndex, anchor: anchor)
+                        }
+                    }
                 }
-                .simultaneousGesture(pinchGesture)
+                .id(ObjectIdentifier(document))
 
                 if let asset = model.pendingSignatureAsset {
                     Label(
@@ -134,28 +171,133 @@ private struct PageSidebar: View {
     @EnvironmentObject private var model: DocumentModel
 
     var body: some View {
-        List(selection: $model.currentPage) {
-            if let document = model.document {
-                ForEach(0..<document.pageCount, id: \.self) { index in
-                    VStack(spacing: 6) {
-                        if let page = document.page(at: index) {
-                            Image(nsImage: page.thumbnail(of: CGSize(width: 112, height: 150), for: .mediaBox))
-                                .resizable()
-                                .scaledToFit()
-                                .shadow(radius: 2)
+        ScrollViewReader { reader in
+            List(selection: pageSelection) {
+                if let document = model.document {
+                    ForEach(0..<document.pageCount, id: \.self) { index in
+                        VStack(spacing: 6) {
+                            if let page = document.page(at: index) {
+                                Image(nsImage: page.thumbnail(of: CGSize(width: 112, height: 150), for: .mediaBox))
+                                    .resizable()
+                                    .scaledToFit()
+                                    .shadow(radius: 2)
+                            }
+                            Text("第 \(index + 1) 页")
+                                .font(.caption)
                         }
-                        Text("第 \(index + 1) 页")
-                            .font(.caption)
+                        .padding(.vertical, 6)
+                        .tag(index)
+                        .id(index)
+                        .simultaneousGesture(
+                            TapGesture().onEnded {
+                                model.requestPageNavigation(to: index)
+                            }
+                        )
                     }
-                    .padding(.vertical, 6)
-                    .tag(index)
                 }
+            }
+            .onChange(of: model.currentPage) { pageIndex in
+                reader.scrollTo(pageIndex, anchor: .center)
             }
         }
         .navigationTitle("页面")
-        .onChange(of: model.currentPage) { _ in
-            model.selectedPlacementID = nil
-            model.cancelSignaturePlacement()
+    }
+
+    private var pageSelection: Binding<Int> {
+        Binding(
+            get: { model.currentPage },
+            set: { model.requestPageNavigation(to: $0) }
+        )
+    }
+}
+
+enum ContinuousPageGeometry {
+    static func activePageIndex(
+        viewport: CGRect,
+        pageFrames: [Int: CGRect],
+        pageCount: Int,
+        keeping currentPage: Int?
+    ) -> Int? {
+        guard pageCount > 0, viewport.width > 0, viewport.height > 0,
+              viewport.minY.isFinite, viewport.maxY.isFinite else { return nil }
+
+        let validFrames = pageFrames.compactMap { pageIndex, frame -> (Int, CGRect)? in
+            guard pageIndex >= 0, pageIndex < pageCount,
+                  frame.width > 0, frame.height > 0,
+                  frame.minY.isFinite, frame.maxY.isFinite else { return nil }
+            return (pageIndex, frame)
+        }
+        let lastPageIndex = pageCount - 1
+        let firstPageFrame = validFrames.first(where: { $0.0 == 0 })?.1
+        let lastPageFrame = validFrames.first(where: { $0.0 == lastPageIndex })?.1
+        let atDocumentTop = firstPageFrame.map { $0.minY >= viewport.minY } ?? false
+        let atDocumentBottom = lastPageFrame.map { $0.maxY <= viewport.maxY } ?? false
+        if atDocumentTop && atDocumentBottom,
+           let currentPage,
+           validFrames.contains(where: { $0.0 == currentPage }) {
+            return currentPage
+        }
+        if atDocumentTop && !atDocumentBottom {
+            return 0
+        }
+        if atDocumentBottom && !atDocumentTop {
+            return lastPageIndex
+        }
+
+        let visibleFrames = validFrames.filter {
+            $0.1.maxY > viewport.minY && $0.1.minY < viewport.maxY
+        }
+        let framesToRank = visibleFrames.isEmpty ? validFrames : visibleFrames
+        let candidates = framesToRank.map { pageIndex, frame -> (Int, CGFloat) in
+            let distance: CGFloat
+            if viewport.midY < frame.minY {
+                distance = frame.minY - viewport.midY
+            } else if viewport.midY > frame.maxY {
+                distance = viewport.midY - frame.maxY
+            } else {
+                distance = 0
+            }
+            return (pageIndex, distance)
+        }
+        guard let minimumDistance = candidates.map(\.1).min() else { return nil }
+        let nearest = candidates.filter { abs($0.1 - minimumDistance) < 0.001 }
+        if let currentPage, nearest.contains(where: { $0.0 == currentPage }) {
+            return currentPage
+        }
+        return nearest.map(\.0).min()
+    }
+}
+
+private enum ContinuousScrollLayout {
+    static let coordinateSpaceName = "SignPDFContinuousScroll"
+    static let pageVerticalPadding: CGFloat = 12
+    static let documentVerticalPadding: CGFloat = 24
+    static let horizontalMargin: CGFloat = 36
+
+    static func contentWidth(viewportWidth: CGFloat, maximumPageWidth: CGFloat, zoom: CGFloat) -> CGFloat {
+        max(viewportWidth, maximumPageWidth * zoom + horizontalMargin * 2)
+    }
+}
+
+private struct PageFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
+    }
+}
+
+private struct PageFrameReporter: View {
+    let pageIndex: Int
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: PageFramePreferenceKey.self,
+                value: [
+                    pageIndex: proxy.frame(in: .named(ContinuousScrollLayout.coordinateSpaceName))
+                ]
+            )
         }
     }
 }

@@ -18,6 +18,133 @@ final class SignPDFTests: XCTestCase {
         XCTAssertEqual(ZoomGeometry.stepped(ZoomGeometry.maximum, by: 1), ZoomGeometry.maximum)
     }
 
+    func testContinuousPageGeometryKeepsPageContainingViewportCenter() {
+        let pageFrames = [
+            0: CGRect(x: 100, y: 0, width: 600, height: 800),
+            1: CGRect(x: 100, y: 824, width: 600, height: 200)
+        ]
+        let viewport = CGRect(x: 0, y: 650, width: 800, height: 220)
+
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: viewport,
+                pageFrames: pageFrames,
+                pageCount: 2,
+                keeping: 0
+            ),
+            0
+        )
+    }
+
+    func testContinuousPageGeometryChoosesNearestPageAcrossGapAndKeepsTie() {
+        let pageFrames = [
+            0: CGRect(x: 100, y: 0, width: 600, height: 800),
+            1: CGRect(x: 100, y: 824, width: 600, height: 800)
+        ]
+
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 710, width: 800, height: 220),
+                pageFrames: pageFrames,
+                pageCount: 2,
+                keeping: 0
+            ),
+            1
+        )
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 702, width: 800, height: 220),
+                pageFrames: pageFrames,
+                pageCount: 2,
+                keeping: 1
+            ),
+            1
+        )
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 702, width: 800, height: 220),
+                pageFrames: pageFrames,
+                pageCount: 2,
+                keeping: nil
+            ),
+            0
+        )
+    }
+
+    func testContinuousPageGeometryIgnoresInvalidFrames() {
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 0, width: 800, height: 600),
+                pageFrames: [
+                    0: CGRect(x: 100, y: 0, width: 600, height: 800),
+                    1: .zero,
+                    2: CGRect(x: 0, y: CGFloat.infinity, width: 100, height: 100)
+                ],
+                pageCount: 3,
+                keeping: nil
+            ),
+            0
+        )
+    }
+
+    func testContinuousPageGeometryKeepsFirstAndLastPageAtDocumentEdges() {
+        let topFrames = [
+            0: CGRect(x: 100, y: 36, width: 210, height: 295),
+            1: CGRect(x: 100, y: 355, width: 210, height: 295),
+            2: CGRect(x: 100, y: 674, width: 210, height: 295)
+        ]
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 0, width: 800, height: 700),
+                pageFrames: topFrames,
+                pageCount: 3,
+                keeping: 1
+            ),
+            0
+        )
+
+        let bottomFrames = [
+            0: CGRect(x: 100, y: -269, width: 210, height: 295),
+            1: CGRect(x: 100, y: 50, width: 210, height: 295),
+            2: CGRect(x: 100, y: 369, width: 210, height: 295)
+        ]
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 0, width: 800, height: 700),
+                pageFrames: bottomFrames,
+                pageCount: 3,
+                keeping: 1
+            ),
+            2
+        )
+    }
+
+    func testContinuousPageGeometryKeepsCurrentPageWhenWholeDocumentFitsViewport() {
+        let pageFrames = [
+            0: CGRect(x: 100, y: 12, width: 210, height: 295),
+            1: CGRect(x: 100, y: 331, width: 210, height: 295)
+        ]
+
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 0, width: 800, height: 700),
+                pageFrames: pageFrames,
+                pageCount: 2,
+                keeping: 0
+            ),
+            0
+        )
+        XCTAssertEqual(
+            ContinuousPageGeometry.activePageIndex(
+                viewport: CGRect(x: 0, y: 0, width: 800, height: 700),
+                pageFrames: pageFrames,
+                pageCount: 2,
+                keeping: 1
+            ),
+            1
+        )
+    }
+
     func testClampsPlacementInsidePage() {
         let result = PlacementGeometry.clamped(
             CGRect(x: -20, y: 790, width: 200, height: 100),
@@ -163,6 +290,41 @@ final class SignPDFTests: XCTestCase {
         XCTAssertEqual(exported.page(at: 0)?.bounds(for: .mediaBox).size.width ?? 0, 595, accuracy: 0.01)
         XCTAssertEqual(exported.page(at: 0)?.bounds(for: .mediaBox).size.height ?? 0, 842, accuracy: 0.01)
         XCTAssertGreaterThan(fileSize(at: outputURL), 1_000)
+    }
+
+    func testExporterDrawsSignatureOnlyOnItsAssignedPage() throws {
+        let sourceURL = temporaryPDFURL(named: "page-target-source")
+        let signatureURL = temporaryPDFURL(named: "page-target-signature")
+        let outputURL = temporaryPDFURL(named: "page-target-output")
+        defer { removeTemporaryFiles([sourceURL, signatureURL, outputURL]) }
+
+        try makeSourcePDF(at: sourceURL, pageCount: 2, pageSize: CGSize(width: 595, height: 842))
+        try makeVectorSignaturePDF(at: signatureURL)
+
+        let source = try XCTUnwrap(PDFDocument(url: sourceURL))
+        let signatureDocument = try XCTUnwrap(PDFDocument(url: signatureURL))
+        let asset = try XCTUnwrap(SignatureAsset(
+            name: "signature",
+            url: signatureURL,
+            document: signatureDocument
+        ))
+        let placement = SignaturePlacement(
+            assetID: asset.id,
+            pageIndex: 1,
+            rect: CGRect(x: 100, y: 100, width: 180, height: 56.16)
+        )
+
+        try PDFExporter.export(
+            document: source,
+            placements: [placement],
+            assets: [asset],
+            to: outputURL
+        )
+
+        let exported = try XCTUnwrap(PDFDocument(url: outputURL))
+        let firstPage = try XCTUnwrap(exported.page(at: 0))
+        let secondPage = try XCTUnwrap(exported.page(at: 1))
+        XCTAssertGreaterThan(darkPixelCount(in: secondPage), darkPixelCount(in: firstPage) + 20)
     }
 
     func testExporterFlattensAnnotationAppearanceIntoVisiblePage() throws {
@@ -374,6 +536,59 @@ final class SignPDFTests: XCTestCase {
     }
 
     @MainActor
+    func testContinuousNavigationAndExplicitPagePlacementUseIndependentPageState() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-continuous-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "continuous-document")
+        let signatureURL = temporaryPDFURL(named: "continuous-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        try makeSourcePDF(
+            at: documentURL,
+            pageSizes: [CGSize(width: 600, height: 800), CGSize(width: 240, height: 300)]
+        )
+        try makeVectorSignaturePDF(at: signatureURL)
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let asset = try XCTUnwrap(model.libraryAssets.first)
+
+        XCTAssertEqual(model.pageSize(at: 0), CGSize(width: 600, height: 800))
+        XCTAssertEqual(model.pageSize(at: 1), CGSize(width: 240, height: 300))
+        XCTAssertEqual(model.maximumPageWidth, 600)
+
+        model.beginPlacingSignature(asset)
+        let pendingAssetID = model.pendingSignatureAssetID
+        model.requestPageNavigation(to: 1)
+        let firstRequestID = try XCTUnwrap(model.pageNavigationRequest?.id)
+        model.requestPageNavigation(to: 1)
+        let secondRequest = try XCTUnwrap(model.pageNavigationRequest)
+
+        XCTAssertNotEqual(firstRequestID, secondRequest.id)
+        XCTAssertEqual(model.currentPage, 1)
+        XCTAssertEqual(model.pendingSignatureAssetID, pendingAssetID)
+
+        model.updateCurrentPageFromViewport(0)
+        XCTAssertEqual(model.currentPage, 0)
+        XCTAssertEqual(model.pageNavigationRequest, secondRequest)
+        XCTAssertEqual(model.pendingSignatureAssetID, pendingAssetID)
+
+        model.placePendingSignature(at: CGPoint(x: 235, y: 5), onPage: 1)
+        let placement = try XCTUnwrap(model.placements.first)
+        XCTAssertEqual(placement.pageIndex, 1)
+        XCTAssertEqual(model.currentPage, 1)
+        XCTAssertNil(model.pendingSignatureAssetID)
+        XCTAssertEqual(placement.rect.maxX, 240, accuracy: 0.001)
+        XCTAssertEqual(placement.rect.minY, 0, accuracy: 0.001)
+        XCTAssertEqual(
+            placement.rect.width / placement.rect.height,
+            asset.aspectRatio,
+            accuracy: 0.001
+        )
+    }
+
+    @MainActor
     func testUnsavedChangesFollowTheEffectiveSignatureLayout() throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SignPDF-library-\(UUID().uuidString)", isDirectory: true)
@@ -421,12 +636,24 @@ final class SignPDFTests: XCTestCase {
     }
 
     private func makeSourcePDF(at url: URL, pageCount: Int, pageSize: CGSize) throws {
-        var mediaBox = CGRect(origin: .zero, size: pageSize)
-        let consumer = try XCTUnwrap(CGDataConsumer(url: url as CFURL))
-        let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &mediaBox, nil))
+        try makeSourcePDF(at: url, pageSizes: Array(repeating: pageSize, count: pageCount))
+    }
 
-        for pageIndex in 0..<pageCount {
-            context.beginPDFPage(nil)
+    private func makeSourcePDF(at url: URL, pageSizes: [CGSize]) throws {
+        let firstPageSize = try XCTUnwrap(pageSizes.first)
+        var defaultMediaBox = CGRect(origin: .zero, size: firstPageSize)
+        let consumer = try XCTUnwrap(CGDataConsumer(url: url as CFURL))
+        let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &defaultMediaBox, nil))
+
+        for (pageIndex, pageSize) in pageSizes.enumerated() {
+            var mediaBox = CGRect(origin: .zero, size: pageSize)
+            let pageInfo = [
+                kCGPDFContextMediaBox as String: NSData(
+                    bytes: &mediaBox,
+                    length: MemoryLayout<CGRect>.size
+                )
+            ] as CFDictionary
+            context.beginPDFPage(pageInfo)
             context.setFillColor(CGColor(gray: 1, alpha: 1))
             context.fill(mediaBox)
             context.setStrokeColor(CGColor(gray: 0.15, alpha: 1))

@@ -4,13 +4,15 @@ import SwiftUI
 
 struct PDFCanvasRepresentable: NSViewRepresentable {
     @ObservedObject var model: DocumentModel
+    let pageIndex: Int
 
     func makeNSView(context: Context) -> PDFCanvasView {
-        PDFCanvasView(model: model)
+        PDFCanvasView(model: model, pageIndex: pageIndex)
     }
 
     func updateNSView(_ view: PDFCanvasView, context: Context) {
         view.model = model
+        view.pageIndex = pageIndex
         view.synchronizeInteractionState()
         view.needsDisplay = true
     }
@@ -18,6 +20,14 @@ struct PDFCanvasRepresentable: NSViewRepresentable {
 
 final class PDFCanvasView: NSView {
     var model: DocumentModel
+    var pageIndex: Int {
+        didSet {
+            guard pageIndex != oldValue else { return }
+            resetDrag()
+            hoverPoint = nil
+            needsDisplay = true
+        }
+    }
     private var dragStart: CGPoint?
     private var originalPlacement: SignaturePlacement?
     private var isResizing = false
@@ -51,8 +61,9 @@ final class PDFCanvasView: NSView {
         return NSCursor(image: image, hotSpot: NSPoint(x: 2, y: 2))
     }()
 
-    init(model: DocumentModel) {
+    init(model: DocumentModel, pageIndex: Int) {
         self.model = model
+        self.pageIndex = pageIndex
         super.init(frame: .zero)
     }
 
@@ -112,7 +123,7 @@ final class PDFCanvasView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext,
-              let page = model.currentPDFPage else { return }
+              let page else { return }
 
         NSColor.white.setFill()
         bounds.fill()
@@ -128,7 +139,7 @@ final class PDFCanvasView: NSView {
             guard let asset = model.asset(for: placement) else { continue }
             let target = CanvasGeometry.drawingRect(
                 for: placement.rect,
-                pageSize: model.currentPageSize,
+                pageSize: pageSize,
                 canvasSize: bounds.size
             )
             PDFExporter.draw(asset.page, in: target, context: context)
@@ -137,7 +148,7 @@ final class PDFCanvasView: NSView {
         if let preview {
             let target = CanvasGeometry.drawingRect(
                 for: preview.rect,
-                pageSize: model.currentPageSize,
+                pageSize: pageSize,
                 canvasSize: bounds.size
             )
             context.saveGState()
@@ -154,7 +165,7 @@ final class PDFCanvasView: NSView {
             drawPlacementPreview(
                 CanvasGeometry.visualRect(
                     for: preview.rect,
-                    pageSize: model.currentPageSize,
+                    pageSize: pageSize,
                     canvasSize: bounds.size
                 )
             )
@@ -162,7 +173,15 @@ final class PDFCanvasView: NSView {
     }
 
     private var currentPlacements: [SignaturePlacement] {
-        model.placements.filter { $0.pageIndex == model.currentPage }
+        model.placements.filter { $0.pageIndex == pageIndex }
+    }
+
+    private var page: PDFPage? {
+        model.pdfPage(at: pageIndex)
+    }
+
+    private var pageSize: CGSize {
+        model.pageSize(at: pageIndex)
     }
 
     private var selectedPlacement: SignaturePlacement? {
@@ -174,16 +193,19 @@ final class PDFCanvasView: NSView {
               let hoverPoint,
               let pagePoint = CanvasGeometry.pdfPoint(
                 for: hoverPoint,
-                pageSize: model.currentPageSize,
+                pageSize: pageSize,
                 canvasSize: bounds.size
               ) else { return nil }
-        return (asset, model.proposedSignatureRect(for: asset, centeredAt: pagePoint))
+        return (
+            asset,
+            model.proposedSignatureRect(for: asset, centeredAt: pagePoint, onPage: pageIndex)
+        )
     }
 
     private func visualRect(for placement: SignaturePlacement) -> CGRect {
         CanvasGeometry.visualRect(
             for: placement.rect,
-            pageSize: model.currentPageSize,
+            pageSize: pageSize,
             canvasSize: bounds.size
         )
     }
@@ -234,6 +256,7 @@ final class PDFCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        model.updateCurrentPageFromViewport(pageIndex)
         let point = convert(event.locationInWindow, from: nil)
 
         if model.pendingSignatureAssetID != nil {
@@ -243,10 +266,10 @@ final class PDFCanvasView: NSView {
             }
             guard let pagePoint = CanvasGeometry.pdfPoint(
                 for: point,
-                pageSize: model.currentPageSize,
+                pageSize: pageSize,
                 canvasSize: bounds.size
             ) else { return }
-            model.placePendingSignature(at: pagePoint)
+            model.placePendingSignature(at: pagePoint, onPage: pageIndex)
             hoverPoint = nil
             synchronizeInteractionState()
             needsDisplay = true
@@ -282,7 +305,7 @@ final class PDFCanvasView: NSView {
         guard let start = dragStart, let original = originalPlacement,
               let index = model.placements.firstIndex(where: { $0.id == original.id }) else { return }
         let point = convert(event.locationInWindow, from: nil)
-        let scale = CanvasGeometry.scale(pageSize: model.currentPageSize, canvasSize: bounds.size)
+        let scale = CanvasGeometry.scale(pageSize: pageSize, canvasSize: bounds.size)
         let dx = (point.x - start.x) / scale
         let dy = (point.y - start.y) / scale
         var updated = original
@@ -298,7 +321,7 @@ final class PDFCanvasView: NSView {
             updated.rect.origin.y -= dy
         }
 
-        updated.rect = PlacementGeometry.clamped(updated.rect, to: model.currentPageSize)
+        updated.rect = PlacementGeometry.clamped(updated.rect, to: pageSize)
         model.placements[index] = updated
         needsDisplay = true
     }
@@ -330,6 +353,7 @@ final class PDFCanvasView: NSView {
         guard let hit = currentPlacements.reversed().first(where: { visualRect(for: $0).contains(point) }) else {
             return nil
         }
+        model.updateCurrentPageFromViewport(pageIndex)
         model.selectedPlacementID = hit.id
         needsDisplay = true
         let menu = NSMenu()
@@ -352,7 +376,8 @@ final class PDFCanvasView: NSView {
             return
         }
         guard let id = model.selectedPlacementID,
-              let index = model.placements.firstIndex(where: { $0.id == id }) else {
+              let index = model.placements.firstIndex(where: { $0.id == id }),
+              model.placements[index].pageIndex == pageIndex else {
             super.keyDown(with: event)
             return
         }
@@ -367,7 +392,7 @@ final class PDFCanvasView: NSView {
             super.keyDown(with: event)
             return
         }
-        model.placements[index].rect = PlacementGeometry.clamped(rect, to: model.currentPageSize)
+        model.placements[index].rect = PlacementGeometry.clamped(rect, to: pageSize)
         needsDisplay = true
     }
 
