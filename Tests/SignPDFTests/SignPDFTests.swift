@@ -91,7 +91,11 @@ final class SignPDFTests: XCTestCase {
 
         let source = try XCTUnwrap(PDFDocument(url: sourceURL))
         let signatureDocument = try XCTUnwrap(PDFDocument(url: signatureURL))
-        let asset = SignatureAsset(name: "signature", url: signatureURL, document: signatureDocument)
+        let asset = try XCTUnwrap(SignatureAsset(
+            name: "signature",
+            url: signatureURL,
+            document: signatureDocument
+        ))
         let placement = SignaturePlacement(
             assetID: asset.id,
             pageIndex: 0,
@@ -138,6 +142,122 @@ final class SignPDFTests: XCTestCase {
         let exportedPage = try XCTUnwrap(exported.page(at: 0))
         XCTAssertTrue(exportedPage.annotations.isEmpty)
         XCTAssertGreaterThan(darkPixelCount(in: exportedPage), 20)
+    }
+
+    @MainActor
+    func testSignatureLibraryPersistsAndDeletesImportedSignature() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-library-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "persistent-signature")
+        let documentURL = temporaryPDFURL(named: "document")
+        let outputURL = temporaryPDFURL(named: "detached-output")
+        defer { removeTemporaryFiles([rootURL, sourceURL, documentURL, outputURL]) }
+
+        try makeVectorSignaturePDF(at: sourceURL)
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 300, height: 200))
+        let library = SignatureLibrary(rootURL: rootURL)
+        let firstModel = DocumentModel(signatureLibrary: library)
+        let expectedName = sourceURL.deletingPathExtension().lastPathComponent
+
+        firstModel.importSignatures(urls: [sourceURL, sourceURL])
+
+        let imported = try XCTUnwrap(firstModel.assets.first)
+        XCTAssertEqual(firstModel.assets.count, 1)
+        XCTAssertEqual(imported.name, expectedName)
+        XCTAssertNotEqual(imported.url.standardizedFileURL, sourceURL.standardizedFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: imported.url.path))
+
+        try FileManager.default.removeItem(at: sourceURL)
+
+        let restoredModel = DocumentModel(signatureLibrary: library)
+        let restored = try XCTUnwrap(restoredModel.assets.first)
+        XCTAssertEqual(restoredModel.assets.count, 1)
+        XCTAssertEqual(restored.id, imported.id)
+        XCTAssertEqual(restored.name, imported.name)
+        XCTAssertNotNil(restored.document.page(at: 0))
+
+        restoredModel.open(url: documentURL)
+        restoredModel.addSignature(restored)
+        XCTAssertEqual(restoredModel.placements.count, 1)
+        XCTAssertNotNil(restoredModel.selectedPlacementID)
+
+        restoredModel.deleteAsset(restored)
+        XCTAssertTrue(restoredModel.libraryAssets.isEmpty)
+        XCTAssertEqual(restoredModel.assets.count, 1)
+        XCTAssertEqual(restoredModel.placements.count, 1)
+        XCTAssertNotNil(restoredModel.selectedPlacementID)
+        XCTAssertNotNil(restoredModel.asset(for: restoredModel.placements[0]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: imported.url.deletingLastPathComponent().path))
+
+        try PDFExporter.export(
+            document: restoredModel.document,
+            placements: restoredModel.placements,
+            assets: restoredModel.assets,
+            to: outputURL
+        )
+        XCTAssertGreaterThan(fileSize(at: outputURL), 1_000)
+        let exportedDocument = try XCTUnwrap(PDFDocument(url: outputURL))
+        let exportedPage = try XCTUnwrap(exportedDocument.page(at: 0))
+        let unsignedPage = try XCTUnwrap(restoredModel.document?.page(at: 0))
+        XCTAssertGreaterThan(
+            darkPixelCount(in: exportedPage),
+            darkPixelCount(in: unsignedPage) + 20
+        )
+
+        let reloadedModel = DocumentModel(signatureLibrary: library)
+        XCTAssertTrue(reloadedModel.libraryAssets.isEmpty)
+
+        restoredModel.deleteSelected()
+        XCTAssertTrue(restoredModel.placements.isEmpty)
+        XCTAssertTrue(restoredModel.assets.isEmpty)
+    }
+
+    @MainActor
+    func testSignatureLibraryRejectsMultipagePDF() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-library-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "multipage-signature")
+        defer { removeTemporaryFiles([rootURL, sourceURL]) }
+
+        try makeSourcePDF(at: sourceURL, pageCount: 2, pageSize: CGSize(width: 500, height: 156))
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+
+        model.importSignatures(urls: [sourceURL])
+
+        XCTAssertTrue(model.assets.isEmpty)
+        XCTAssertTrue(model.alertMessage?.contains("必须只有一页") == true)
+    }
+
+    func testSignatureLibraryIsolatesCorruptItemsWithoutHidingValidSignatures() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-library-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "valid-signature")
+        defer { removeTemporaryFiles([rootURL, sourceURL]) }
+
+        try makeVectorSignaturePDF(at: sourceURL)
+        let library = SignatureLibrary(rootURL: rootURL)
+        _ = try library.importSignature(from: sourceURL, name: "Valid")
+
+        let corruptID = UUID()
+        let corruptURL = rootURL.appendingPathComponent(corruptID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: corruptURL, withIntermediateDirectories: false)
+        try Data("not-json".utf8).write(
+            to: corruptURL.appendingPathComponent("metadata.json"),
+            options: .atomic
+        )
+        try FileManager.default.copyItem(
+            at: sourceURL,
+            to: corruptURL.appendingPathComponent("signature.pdf")
+        )
+
+        let firstLoad = try library.load()
+        XCTAssertEqual(firstLoad.assets.count, 1)
+        XCTAssertEqual(firstLoad.skippedItemCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: corruptURL.path))
+
+        let secondLoad = try library.load()
+        XCTAssertEqual(secondLoad.assets.count, 1)
+        XCTAssertEqual(secondLoad.skippedItemCount, 0)
     }
 
     private func makeSourcePDF(at url: URL, pageCount: Int, pageSize: CGSize) throws {

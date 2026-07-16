@@ -64,7 +64,6 @@ struct ContentView: View {
             Button { model.importSignatures() } label: {
                 Label("导入签名", systemImage: "signature")
             }
-            .disabled(model.document == nil)
             Button { model.exportDocument() } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -123,35 +122,57 @@ private struct PageSidebar: View {
 
 private struct SignatureSidebar: View {
     @EnvironmentObject private var model: DocumentModel
+    @State private var assetPendingDeletion: SignatureAsset?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("矢量签名").font(.headline)
-            if model.assets.isEmpty {
+            Text("签名库").font(.headline)
+            if model.libraryAssets.isEmpty {
                 Spacer()
                 EmptyState(
-                    title: "尚未导入签名",
+                    title: "尚未保存签名",
                     systemImage: "signature",
-                    description: "请导入单页 PDF 格式的矢量签名。"
+                    description: "导入单页矢量 PDF；签名会保存在本机供以后使用。"
                 ) { EmptyView() }
                 Spacer()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 10) {
-                        ForEach(model.assets) { asset in
-                            Button { model.addSignature(asset) } label: {
-                                VStack(spacing: 8) {
-                                    PDFPageVectorPreview(page: asset.page)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: 80)
-                                    Text(asset.name).lineLimit(1)
+                        ForEach(model.libraryAssets) { asset in
+                            ZStack(alignment: .topTrailing) {
+                                Button { model.addSignature(asset) } label: {
+                                    VStack(spacing: 8) {
+                                        PDFPageVectorPreview(page: asset.page)
+                                            .frame(maxWidth: .infinity)
+                                            .frame(height: 80)
+                                        Text(asset.name).lineLimit(1)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(10)
+                                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
                                 }
-                                .frame(maxWidth: .infinity)
-                                .padding(10)
-                                .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                                .buttonStyle(.plain)
+                                .disabled(model.document == nil)
+                                .help(model.document == nil ? "请先打开一份 PDF" : "添加到当前页")
+
+                                Menu {
+                                    Button("从签名库删除…", role: .destructive) {
+                                        assetPendingDeletion = asset
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis.circle.fill")
+                                        .font(.title3)
+                                        .symbolRenderingMode(.hierarchical)
+                                }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                                .padding(7)
                             }
-                            .buttonStyle(.plain)
-                            .help("添加到当前页")
+                            .contextMenu {
+                                Button("从签名库删除…", role: .destructive) {
+                                    assetPendingDeletion = asset
+                                }
+                            }
                         }
                     }
                 }
@@ -163,6 +184,37 @@ private struct SignatureSidebar: View {
             .controlSize(.large)
         }
         .padding()
+        .confirmationDialog(
+            "删除签名？",
+            isPresented: deletionDialogPresented,
+            titleVisibility: .visible,
+            presenting: assetPendingDeletion
+        ) { asset in
+            Button("从签名库删除", role: .destructive) {
+                assetPendingDeletion = nil
+                model.deleteAsset(asset)
+            }
+            Button("取消", role: .cancel) {
+                assetPendingDeletion = nil
+            }
+        } message: { asset in
+            Text(deletionMessage(for: asset))
+        }
+    }
+
+    private var deletionDialogPresented: Binding<Bool> {
+        Binding(
+            get: { assetPendingDeletion != nil },
+            set: { if !$0 { assetPendingDeletion = nil } }
+        )
+    }
+
+    private func deletionMessage(for asset: SignatureAsset) -> String {
+        let placementCount = model.placements.lazy.filter { $0.assetID == asset.id }.count
+        if placementCount > 0 {
+            return "“\(asset.name)”会从本机签名库中永久删除；当前文档中已经插入的 \(placementCount) 个实例会保留。"
+        }
+        return "“\(asset.name)”会从本机签名库中永久删除。"
     }
 }
 

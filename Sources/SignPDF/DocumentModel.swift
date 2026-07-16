@@ -3,17 +3,27 @@ import PDFKit
 import SwiftUI
 
 struct SignatureAsset: Identifiable {
-    let id = UUID()
+    let id: UUID
     let name: String
     let url: URL
     let document: PDFDocument
     let page: PDFPage
+    let isInLibrary: Bool
 
-    init(name: String, url: URL, document: PDFDocument) {
+    init?(
+        id: UUID = UUID(),
+        name: String,
+        url: URL,
+        document: PDFDocument,
+        isInLibrary: Bool = true
+    ) {
+        guard let page = document.page(at: 0) else { return nil }
+        self.id = id
         self.name = name
         self.url = url
         self.document = document
-        self.page = document.page(at: 0)!
+        self.page = page
+        self.isInLibrary = isInLibrary
     }
 
     var aspectRatio: CGFloat {
@@ -38,12 +48,20 @@ struct SignaturePlacement: Identifiable, Equatable {
 
 enum SignPDFError: LocalizedError {
     case cannotReadPDF(String)
+    case signatureMustBeSinglePage(String)
+    case cannotLoadSignatures
+    case cannotSaveSignature(String)
+    case cannotDeleteSignature(String)
     case cannotCreateOutput
     case cannotWriteOutput
 
     var errorDescription: String? {
         switch self {
         case .cannotReadPDF(let name): return "无法读取 PDF：\(name)"
+        case .signatureMustBeSinglePage(let name): return "签名 PDF 必须只有一页：\(name)"
+        case .cannotLoadSignatures: return "无法读取已保存的签名库。"
+        case .cannotSaveSignature(let name): return "无法保存签名：\(name)"
+        case .cannotDeleteSignature(let name): return "无法删除签名：\(name)"
         case .cannotCreateOutput: return "无法创建输出 PDF。"
         case .cannotWriteOutput: return "写入 PDF 时发生错误。"
         }
@@ -61,7 +79,26 @@ final class DocumentModel: ObservableObject {
     @Published var zoom: CGFloat = 1
     @Published var alertMessage: String?
 
+    private let signatureLibrary: SignatureLibrary
+
+    init(signatureLibrary: SignatureLibrary = SignatureLibrary()) {
+        self.signatureLibrary = signatureLibrary
+        do {
+            let result = try signatureLibrary.load()
+            assets = result.assets
+            if result.skippedItemCount > 0 {
+                alertMessage = "有 \(result.skippedItemCount) 个已保存的签名无法读取。"
+            }
+        } catch {
+            alertMessage = SignPDFError.cannotLoadSignatures.localizedDescription
+        }
+    }
+
     var pageCount: Int { document?.pageCount ?? 0 }
+
+    var libraryAssets: [SignatureAsset] {
+        assets.filter(\.isInLibrary)
+    }
 
     var currentPDFPage: PDFPage? {
         guard let document, currentPage >= 0, currentPage < document.pageCount else { return nil }
@@ -90,6 +127,7 @@ final class DocumentModel: ObservableObject {
         sourceURL = url
         currentPage = 0
         placements = []
+        purgeUnusedDetachedAssets()
         selectedPlacementID = nil
         zoom = 1
     }
@@ -105,16 +143,24 @@ final class DocumentModel: ObservableObject {
 
     func importSignatures(urls: [URL]) {
         for url in urls {
-            guard !assets.contains(where: { $0.url == url }) else { continue }
             guard let document = PDFDocument(url: url), document.pageCount > 0 else {
                 present(SignPDFError.cannotReadPDF(url.lastPathComponent))
                 continue
             }
-            assets.append(SignatureAsset(
-                name: url.deletingPathExtension().lastPathComponent,
-                url: url,
-                document: document
-            ))
+            guard document.pageCount == 1 else {
+                present(SignPDFError.signatureMustBeSinglePage(url.lastPathComponent))
+                continue
+            }
+            guard !signatureLibrary.containsCopy(of: url, in: libraryAssets) else { continue }
+            do {
+                let asset = try signatureLibrary.importSignature(
+                    from: url,
+                    name: url.deletingPathExtension().lastPathComponent
+                )
+                assets.append(asset)
+            } catch {
+                present(SignPDFError.cannotSaveSignature(url.lastPathComponent))
+            }
         }
     }
 
@@ -148,6 +194,48 @@ final class DocumentModel: ObservableObject {
         if selectedPlacementID == id {
             selectedPlacementID = nil
         }
+        purgeUnusedDetachedAssets()
+    }
+
+    func deleteAsset(_ asset: SignatureAsset) {
+        do {
+            let isUsedInDocument = placements.contains { $0.assetID == asset.id }
+            let detachedAsset: SignatureAsset?
+            if isUsedInDocument {
+                let detachedData = asset.document.dataRepresentation()
+                    ?? (try? Data(contentsOf: asset.url))
+                guard let detachedData,
+                      let document = PDFDocument(data: detachedData),
+                      let detached = SignatureAsset(
+                        id: asset.id,
+                        name: asset.name,
+                        url: asset.url,
+                        document: document,
+                        isInLibrary: false
+                      ) else {
+                    throw SignPDFError.cannotReadPDF(asset.name)
+                }
+                detachedAsset = detached
+            } else {
+                detachedAsset = nil
+            }
+
+            try signatureLibrary.delete(asset)
+
+            if let index = assets.firstIndex(where: { $0.id == asset.id }),
+               let detachedAsset {
+                assets[index] = detachedAsset
+            } else {
+                assets.removeAll { $0.id == asset.id }
+            }
+        } catch {
+            present(SignPDFError.cannotDeleteSignature(asset.name))
+        }
+    }
+
+    private func purgeUnusedDetachedAssets() {
+        let usedAssetIDs = Set(placements.map(\.assetID))
+        assets.removeAll { !$0.isInLibrary && !usedAssetIDs.contains($0.id) }
     }
 
     func exportDocument() {

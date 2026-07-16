@@ -11,6 +11,8 @@ Everything runs locally. SignPDF does not upload documents or signatures to a se
 - Native SwiftUI and AppKit interface for macOS.
 - Open PDFs from Finder, the Open With menu, or the app toolbar.
 - Import one or more single-page PDF signature files.
+- Keep imported signatures in a local library for reuse across launches.
+- Remove saved signatures from the library when they are no longer needed.
 - Add multiple signatures to any page.
 - Drag signatures to reposition them.
 - Resize signatures proportionally with the selection handle.
@@ -54,12 +56,14 @@ The installer writes directly to `/Applications` when it is writable. Otherwise,
 ## Usage
 
 1. Open the PDF that needs to be signed.
-2. Select **Import Signature PDF** and choose one or more single-page vector PDF signatures.
+2. Select **Import Signature PDF** and choose one or more single-page vector PDF signatures. Imported signatures are copied into SignPDF's local Application Support directory and restored the next time the app opens.
 3. Click a signature in the right sidebar to add it to the current page.
 4. Drag the signature to position it.
 5. Drag the lower-right selection handle to resize it proportionally.
 6. Use the toolbar trash button or the signature context menu to delete it.
 7. Select **Export** to create the signed PDF.
+
+To remove a saved signature, use the ellipsis menu on its card in the signature library. Existing instances in the document currently being edited remain in place and can still be removed individually with the toolbar trash button or context menu.
 
 SignPDF intentionally does not bind deletion to the bare Delete key. This avoids accidental Finder file deletion when keyboard focus is outside the app.
 
@@ -117,6 +121,7 @@ Sources/SignPDF/
   PDFCanvasView.swift         Interactive PDF editor canvas
   PDFExporter.swift           Vector PDF composition and export
   PDFPageVectorPreview.swift  Vector signature previews
+  SignatureLibrary.swift      Persistent local signature storage
   SignPDFApp.swift            App lifecycle and Finder open handling
-Tests/SignPDFTests/           Geometry and PDF export tests
+Tests/SignPDFTests/           Geometry, PDF export, and persistence tests
 ```
