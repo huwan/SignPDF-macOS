@@ -31,7 +31,7 @@ No third-party runtime dependencies are required.
 
 ## Install
 
-Build and install SignPDF for the current user:
+Build and install SignPDF in the system Applications folder:
 
 ```bash
 ./Scripts/install-app.sh
@@ -40,16 +40,16 @@ Build and install SignPDF for the current user:
 The app is installed at:
 
 ```text
-~/Applications/SignPDF.app
+/Applications/SignPDF.app
 ```
 
 The installer also registers SignPDF as a PDF editor with macOS Launch Services. After installation, you can:
 
-- Double-click SignPDF in `~/Applications`.
+- Double-click SignPDF in `/Applications`.
 - Right-click a PDF and choose **Open With > SignPDF**.
 - Drag a PDF onto the SignPDF app icon.
 
-No administrator privileges or password prompts are required.
+The installer writes directly to `/Applications` when it is writable. Otherwise, it attempts non-interactive administrator authorization with `sudo -n` and exits with an error instead of opening a password prompt if authorization is unavailable.
 
 ## Usage
 
@@ -110,7 +110,7 @@ Resources/
   Info.plist                  macOS bundle metadata and PDF association
 Scripts/
   build-app.sh                Builds and signs a local app bundle
-  install-app.sh              Installs and registers the app for the user
+  install-app.sh              Installs and registers the app in /Applications
 Sources/SignPDF/
   ContentView.swift           Main SwiftUI layout
   DocumentModel.swift         Document, signature, and placement state
