@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: DocumentModel
+    @GestureState private var pinchScale: CGFloat = 1
 
     var body: some View {
         NavigationSplitView {
@@ -34,6 +35,20 @@ struct ContentView: View {
         )
     }
 
+    private var effectiveZoom: CGFloat {
+        ZoomGeometry.magnified(model.zoom, by: pinchScale)
+    }
+
+    private var pinchGesture: some Gesture {
+        MagnificationGesture()
+            .updating($pinchScale) { value, state, _ in
+                state = value
+            }
+            .onEnded { value in
+                model.zoom = ZoomGeometry.magnified(model.zoom, by: value)
+            }
+    }
+
     @ViewBuilder
     private var canvasArea: some View {
         if model.document == nil {
@@ -50,12 +65,13 @@ struct ContentView: View {
                 ScrollView([.horizontal, .vertical]) {
                     PDFCanvasRepresentable(model: model)
                         .frame(
-                            width: model.currentPageSize.width * model.zoom,
-                            height: model.currentPageSize.height * model.zoom
+                            width: model.currentPageSize.width * effectiveZoom,
+                            height: model.currentPageSize.height * effectiveZoom
                         )
                         .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
                         .padding(36)
                 }
+                .simultaneousGesture(pinchGesture)
 
                 if let asset = model.pendingSignatureAsset {
                     Label(
@@ -101,13 +117,13 @@ struct ContentView: View {
             }
         }
         ToolbarItemGroup {
-            Button { model.zoom = max(0.35, model.zoom - 0.1) } label: {
+            Button { model.zoom = ZoomGeometry.stepped(model.zoom, by: -ZoomGeometry.step) } label: {
                 Image(systemName: "minus.magnifyingglass")
             }
-            Text("\(Int(model.zoom * 100))%")
+            Text("\(Int((effectiveZoom * 100).rounded()))%")
                 .monospacedDigit()
                 .frame(width: 46)
-            Button { model.zoom = min(3, model.zoom + 0.1) } label: {
+            Button { model.zoom = ZoomGeometry.stepped(model.zoom, by: ZoomGeometry.step) } label: {
                 Image(systemName: "plus.magnifyingglass")
             }
         }

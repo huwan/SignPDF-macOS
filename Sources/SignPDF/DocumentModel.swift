@@ -46,6 +46,24 @@ struct SignaturePlacement: Identifiable, Equatable {
     }
 }
 
+enum ZoomGeometry {
+    static let minimum: CGFloat = 0.35
+    static let maximum: CGFloat = 3
+    static let step: CGFloat = 0.1
+
+    static func clamped(_ zoom: CGFloat) -> CGFloat {
+        min(maximum, max(minimum, zoom))
+    }
+
+    static func stepped(_ zoom: CGFloat, by delta: CGFloat) -> CGFloat {
+        clamped(zoom + delta)
+    }
+
+    static func magnified(_ zoom: CGFloat, by scale: CGFloat) -> CGFloat {
+        clamped(zoom * scale)
+    }
+}
+
 private struct SignatureLayoutItem: Equatable {
     let assetID: UUID
     let pageIndex: Int

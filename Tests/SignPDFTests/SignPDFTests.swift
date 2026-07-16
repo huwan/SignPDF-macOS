@@ -4,6 +4,20 @@ import XCTest
 @testable import SignPDF
 
 final class SignPDFTests: XCTestCase {
+    func testZoomGeometrySupportsTrackpadMagnificationAndToolbarSteps() {
+        XCTAssertEqual(ZoomGeometry.magnified(1, by: 1.25), 1.25, accuracy: 0.001)
+        XCTAssertEqual(ZoomGeometry.magnified(2, by: 0.75), 1.5, accuracy: 0.001)
+        XCTAssertEqual(ZoomGeometry.stepped(1, by: ZoomGeometry.step), 1.1, accuracy: 0.001)
+        XCTAssertEqual(ZoomGeometry.stepped(1, by: -ZoomGeometry.step), 0.9, accuracy: 0.001)
+    }
+
+    func testZoomGeometryClampsTrackpadMagnificationToSupportedRange() {
+        XCTAssertEqual(ZoomGeometry.magnified(1, by: 0.01), ZoomGeometry.minimum)
+        XCTAssertEqual(ZoomGeometry.magnified(2, by: 10), ZoomGeometry.maximum)
+        XCTAssertEqual(ZoomGeometry.stepped(ZoomGeometry.minimum, by: -1), ZoomGeometry.minimum)
+        XCTAssertEqual(ZoomGeometry.stepped(ZoomGeometry.maximum, by: 1), ZoomGeometry.maximum)
+    }
+
     func testClampsPlacementInsidePage() {
         let result = PlacementGeometry.clamped(
             CGRect(x: -20, y: 790, width: 200, height: 100),

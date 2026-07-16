@@ -23,7 +23,7 @@ Everything runs locally. SignPDF does not upload documents or signatures to a se
 - Use arrow keys for precise positioning; hold Shift to move by 10 points.
 - Delete selected signatures from the toolbar or context menu.
 - Navigate pages with a thumbnail sidebar.
-- Zoom the editor from 35% to 300% without changing export coordinates.
+- Zoom the editor from 35% to 300% with the toolbar or a trackpad pinch gesture, without changing export coordinates.
 - Preserve vector page content and vector signature artwork during export.
 - Flatten existing annotation and form appearances so filled-in text remains visible.
 - Export beside the source PDF by default as `<name>-signed.pdf`.
