@@ -433,6 +433,23 @@ final class SignPDFTests: XCTestCase {
         )
     }
 
+    func testResizeMeasurementDisplaysLiveWidthInCentimeters() {
+        XCTAssertEqual(
+            ResizeMeasurement.widthText(
+                points: SignatureSizing.points(fromCentimeters: 3.6),
+                locale: Locale(identifier: "en_US")
+            ),
+            "3.6 cm"
+        )
+        XCTAssertEqual(
+            ResizeMeasurement.widthText(
+                points: SignatureSizing.points(fromCentimeters: 4.255),
+                locale: Locale(identifier: "en_US")
+            ),
+            "4.255 cm"
+        )
+    }
+
     func testSignatureSizingRejectsImpracticalAndNonfiniteWidths() {
         XCTAssertNotNil(SignatureSizing.validPoints(
             fromCentimeters: SignatureSizing.minimumWidthCentimeters

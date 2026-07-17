@@ -159,7 +159,11 @@ final class PDFCanvasView: NSView {
         context.restoreGState()
 
         if let selected = selectedPlacement {
-            drawSelection(visualRect(for: selected))
+            let rect = visualRect(for: selected)
+            drawSelection(rect)
+            if isResizing {
+                drawResizeMeasurement(widthPoints: selected.rect.width, near: rect)
+            }
         }
         if let preview {
             drawPlacementPreview(
@@ -229,6 +233,49 @@ final class PDFCanvasView: NSView {
         path.lineWidth = 1.5
         path.setLineDash([5, 3], count: 2, phase: 0)
         path.stroke()
+    }
+
+    private func drawResizeMeasurement(widthPoints: CGFloat, near rect: CGRect) {
+        let text = ResizeMeasurement.widthText(points: widthPoints)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white
+        ]
+        let attributedText = NSAttributedString(string: text, attributes: attributes)
+        let textSize = attributedText.size()
+        let horizontalPadding: CGFloat = 8
+        let verticalPadding: CGFloat = 5
+        let bubbleSize = CGSize(
+            width: textSize.width + horizontalPadding * 2,
+            height: textSize.height + verticalPadding * 2
+        )
+        let margin: CGFloat = 6
+        var bubble = CGRect(
+            x: rect.maxX - bubbleSize.width,
+            y: rect.maxY + 10,
+            width: bubbleSize.width,
+            height: bubbleSize.height
+        )
+        if bubble.maxY > bounds.maxY - margin {
+            bubble.origin.y = rect.maxY - bubble.height - 10
+        }
+        bubble.origin.x = min(
+            max(bounds.minX + margin, bubble.minX),
+            max(bounds.minX + margin, bounds.maxX - bubble.width - margin)
+        )
+        bubble.origin.y = min(
+            max(bounds.minY + margin, bubble.minY),
+            max(bounds.minY + margin, bounds.maxY - bubble.height - margin)
+        )
+
+        NSColor.labelColor.withAlphaComponent(0.88).setFill()
+        NSBezierPath(roundedRect: bubble, xRadius: 5, yRadius: 5).fill()
+        attributedText.draw(
+            at: CGPoint(
+                x: bubble.minX + horizontalPadding,
+                y: bubble.minY + verticalPadding
+            )
+        )
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -348,6 +395,7 @@ final class PDFCanvasView: NSView {
         dragStart = nil
         originalPlacement = nil
         isResizing = false
+        needsDisplay = true
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -415,6 +463,13 @@ final class PDFCanvasView: NSView {
         hoverPoint = nil
         synchronizeInteractionState()
         needsDisplay = true
+    }
+}
+
+enum ResizeMeasurement {
+    static func widthText(points: CGFloat, locale: Locale = .current) -> String {
+        let centimeters = SignatureSizing.centimeters(fromPoints: points)
+        return "\(SignatureWidthText.string(from: centimeters, locale: locale)) cm"
     }
 }
 
