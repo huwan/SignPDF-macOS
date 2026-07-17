@@ -6,11 +6,13 @@
 
 SignPDF is a native macOS app for placing vector signatures onto PDF documents. It provides a visual editor for positioning and resizing signatures while keeping them sharp at any zoom level in the exported PDF.
 
-Everything runs locally. SignPDF does not upload documents or signatures to a server.
+Document and signature processing stays local. SignPDF does not upload documents or signatures; its only network access is checking and downloading signed updates from GitHub Releases.
 
 ## Features
 
 - Native SwiftUI and AppKit interface for macOS.
+- Check GitHub Releases on launch and securely download, install, and relaunch into signed updates with Sparkle.
+- Manually check for updates at any time from the application menu.
 - Open PDFs from Finder, the Open With menu, or the app toolbar.
 - Import one or more single-page PDF signature files.
 - Keep imported signatures in a local library for reuse across launches.
@@ -38,13 +40,13 @@ Everything runs locally. SignPDF does not upload documents or signatures to a se
 - Apple silicon for the prebuilt release
 - Xcode 15.3 or later, including the Xcode Command Line Tools, when building from source
 
-No third-party runtime dependencies are required.
+The release bundle includes Sparkle 2 for secure automatic updates. No separate runtime installation is required.
 
 ## Install
 
 ### Download a release
 
-Download `SignPDF-1.1.2-macOS-arm64.zip` from the [GitHub Releases page](https://github.com/huwan/SignPDF-macOS/releases), unzip it, and move `SignPDF.app` to `/Applications`.
+Download `SignPDF-1.2.0-macOS-arm64.zip` from the [GitHub Releases page](https://github.com/huwan/SignPDF-macOS/releases), unzip it, and move `SignPDF.app` to `/Applications`.
 
 The prebuilt app is ad-hoc signed and is not notarized by Apple. If macOS blocks its first launch, try opening it once, then go to **System Settings > Privacy & Security** and choose **Open Anyway** for SignPDF. This approval is needed only once.
 
@@ -117,6 +119,8 @@ Build an app bundle without installing it:
 
 The generated development bundle is placed under `.build/app/SignPDF.app`.
 
+Swift Package Manager resolves the pinned Sparkle framework used for automatic updates. Release archives are signed with a project Ed25519 key stored in the maintainer's macOS login Keychain; only the public key is embedded in the app.
+
 ## Tests
 
 Run the test suite with:
@@ -136,6 +140,7 @@ Resources/
   Info.plist                  macOS bundle metadata and PDF association
 Scripts/
   build-app.sh                Builds and signs a local app bundle
+  generate-appcast.sh         Signs an update archive and refreshes appcast.xml
   install-app.sh              Installs and registers the app in /Applications
 Sources/SignPDF/
   ContentView.swift           Main SwiftUI layout
@@ -145,5 +150,7 @@ Sources/SignPDF/
   PDFPageVectorPreview.swift  Vector signature previews
   SignatureLibrary.swift      Persistent local signature storage
   SignPDFApp.swift            App lifecycle and Finder open handling
+  UpdateController.swift      Sparkle automatic and manual update integration
 Tests/SignPDFTests/           Geometry, PDF export, and persistence tests
+appcast.xml                   Sparkle stable update feed
 ```

@@ -137,6 +137,7 @@ private struct WindowAccessor: NSViewRepresentable {
 struct SignPDFApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = DocumentModel()
+    private let updateController = UpdateController()
 
     var body: some Scene {
         Window("SignPDF", id: "main") {
@@ -144,10 +145,16 @@ struct SignPDFApp: App {
                 .environmentObject(model)
                 .frame(minWidth: 960, minHeight: 640)
                 .background(WindowAccessor { appDelegate.connect(to: $0) })
-                .onAppear { appDelegate.connect(to: model) }
+                .onAppear {
+                    appDelegate.connect(to: model)
+                    updateController.checkInBackgroundOnLaunch()
+                }
         }
         .defaultSize(width: 1200, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView(updater: updateController.updaterController.updater)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("打开 PDF…") { model.openDocument() }
                     .keyboardShortcut("o")

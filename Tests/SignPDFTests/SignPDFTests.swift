@@ -1,9 +1,33 @@
 import CoreGraphics
+import Foundation
 import PDFKit
 import XCTest
 @testable import SignPDF
 
 final class SignPDFTests: XCTestCase {
+    func testAutomaticUpdateConfigurationUsesSecureSignedFeed() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let infoURL = repositoryRoot.appendingPathComponent("Resources/Info.plist")
+        let data = try Data(contentsOf: infoURL)
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil)
+                as? [String: Any]
+        )
+
+        let feedURL = try XCTUnwrap(URL(string: plist["SUFeedURL"] as? String ?? ""))
+        XCTAssertEqual(feedURL.scheme, "https")
+        XCTAssertEqual(feedURL.host, "raw.githubusercontent.com")
+        XCTAssertEqual(plist["SUEnableAutomaticChecks"] as? Bool, true)
+        XCTAssertEqual(plist["SUAutomaticallyUpdate"] as? Bool, true)
+        XCTAssertEqual(plist["SUAllowsAutomaticUpdates"] as? Bool, true)
+
+        let publicKey = try XCTUnwrap(plist["SUPublicEDKey"] as? String)
+        XCTAssertEqual(Data(base64Encoded: publicKey)?.count, 32)
+    }
+
     func testZoomGeometrySupportsTrackpadMagnificationAndToolbarSteps() {
         XCTAssertEqual(ZoomGeometry.magnified(1, by: 1.25), 1.25, accuracy: 0.001)
         XCTAssertEqual(ZoomGeometry.magnified(2, by: 0.75), 1.5, accuracy: 0.001)

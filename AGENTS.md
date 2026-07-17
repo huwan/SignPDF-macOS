@@ -2,9 +2,9 @@
 
 ## Project overview
 
-SignPDF is a native macOS 13+ SwiftUI/AppKit application for placing reusable vector PDF signatures onto PDF documents. It is a Swift Package executable with no third-party runtime dependencies. The UI is primarily Chinese.
+SignPDF is a native macOS 13+ SwiftUI/AppKit application for placing reusable vector PDF signatures onto PDF documents. It is a Swift Package executable. Sparkle 2 is the only third-party runtime dependency and provides secure automatic updates. The UI is primarily Chinese.
 
-Keep all document and signature processing local. Do not introduce uploads, analytics, network services, or rasterization into the signing workflow.
+Keep all document and signature processing local. Automatic update checks may access the configured GitHub-hosted Sparkle feed, but documents and signatures must never be uploaded. Do not introduce analytics, unrelated network services, or rasterization into the signing workflow.
 
 ## Repository layout
 
@@ -15,10 +15,13 @@ Keep all document and signature processing local. Do not introduce uploads, anal
 - `Sources/SignPDF/PDFPageVectorPreview.swift`: vector preview drawing.
 - `Sources/SignPDF/SignatureLibrary.swift`: persistent signature library under Application Support.
 - `Sources/SignPDF/SignPDFApp.swift`: app lifecycle, Finder open handling, window close/quit safeguards.
+- `Sources/SignPDF/UpdateController.swift`: Sparkle updater lifecycle, launch checks, and manual update command.
 - `Tests/SignPDFTests/SignPDFTests.swift`: geometry, export, persistence, and state regression tests.
 - `Resources/Info.plist`: app and build version plus PDF document association.
 - `Scripts/build-app.sh`: production build, app bundle assembly, icon generation, ad-hoc signing.
+- `Scripts/generate-appcast.sh`: Ed25519-sign a release archive and regenerate the Sparkle appcast.
 - `Scripts/install-app.sh`: build, non-interactive install to `/Applications`, Launch Services registration.
+- `appcast.xml`: GitHub-hosted stable Sparkle update feed.
 
 ## Architecture and implementation rules
 
@@ -60,6 +63,16 @@ Keep all document and signature processing local. Do not introduce uploads, anal
 - Isolate corrupt items without hiding valid signatures.
 - Deleting a library asset that is already placed in the current document must preserve a detached in-memory copy until all placements using it are removed.
 - Maintain backward compatibility with existing metadata unless a migration is deliberately added and tested.
+
+### Automatic updates
+
+- Use the pinned Sparkle dependency in `Package.swift`; do not implement a custom executable downloader or app replacement helper.
+- Keep `SUFeedURL`, `SUPublicEDKey`, `SUEnableAutomaticChecks`, `SUAutomaticallyUpdate`, and `SUAllowsAutomaticUpdates` in `Resources/Info.plist` aligned with the release infrastructure.
+- The stable appcast is hosted from `appcast.xml` on the repository's `main` branch and update archives are downloaded from GitHub Releases over HTTPS.
+- Update archives must be signed with the Sparkle Ed25519 key for Keychain account `app.signpdf.SignPDF`. Never commit or print the private key; only `SUPublicEDKey` belongs in the repository.
+- Preserve the startup background check and the user-initiated Chinese “检查更新…” application-menu command.
+- `Scripts/build-app.sh` must copy `Sparkle.framework` with symlinks intact into `Contents/Frameworks`, preserve the executable rpath, and verify the complete nested code signature.
+- Keep `Package.resolved` committed so release builds use the reviewed Sparkle version.
 
 ## Verification
 
@@ -103,20 +116,22 @@ git status -sb
 
 ## Release process
 
-Stable releases use patch-style semantic versions such as `v1.1.2` and are published from `main`.
+Stable releases use semantic versions such as `v1.1.2` and are published from `main`.
 
 1. Ensure `main` is synchronized with `origin/main` and the worktree contains only intended changes.
 2. Update both values in `Resources/Info.plist`:
    - `CFBundleShortVersionString`: release version without `v`.
    - `CFBundleVersion`: incrementing integer build number.
 3. Update the release asset filename in `README.md`.
-4. Run `swift test` and `./Scripts/build-app.sh`; verify the ad-hoc signature.
-5. Commit with a terse imperative summary and push `main`.
-6. Package the built app as `SignPDF-<version>-macOS-arm64.zip` using `ditto --keepParent`.
-7. Run `unzip -t` and calculate SHA-256 with `shasum -a 256`.
-8. Create a non-draft, non-prerelease GitHub Release titled `SignPDF <version>`, tag `v<version>`, targeting the released commit.
-9. Include highlights, macOS/architecture requirements, installation instructions, the ad-hoc signing warning, and SHA-256 in the release notes.
-10. Verify the uploaded asset, remote tag, release URL, and clean synchronized worktree.
+4. Confirm the Sparkle public key can be read with `.build/artifacts/sparkle/Sparkle/bin/generate_keys --account app.signpdf.SignPDF -p` and still matches `SUPublicEDKey`. Never export the private key into the repository.
+5. Run `swift test` and `./Scripts/build-app.sh`; verify the nested ad-hoc signature and embedded Sparkle framework.
+6. Package the built app as `SignPDF-<version>-macOS-arm64.zip` using `ditto --keepParent`, and place optional Markdown release notes with the same basename beside it.
+7. Run `Scripts/generate-appcast.sh <version> <archive-directory>` to Ed25519-sign the archive and update `appcast.xml`. Review the version, download URL, signature, size, and minimum system version in the generated feed.
+8. Run `unzip -t` and calculate SHA-256 with `shasum -a 256`.
+9. Commit the code, version changes, `Package.resolved`, and updated `appcast.xml` together, then push `main`.
+10. Create a non-draft, non-prerelease GitHub Release titled `SignPDF <version>`, tag `v<version>`, targeting the released commit. Upload the exact signed archive referenced by `appcast.xml` and any generated delta files.
+11. Include highlights, macOS/architecture requirements, installation instructions, the ad-hoc signing warning, and SHA-256 in the release notes.
+12. Verify the uploaded asset, remote tag, raw appcast URL, updater download URL, and clean synchronized worktree.
 
 Do not publish, tag, push, install, or modify a GitHub Release unless the user explicitly requests it.
 
@@ -125,7 +140,7 @@ Do not publish, tag, push, install, or modify a GitHub Release unless the user e
 - Preserve unrelated user changes in a dirty worktree; stage only files belonging to the task.
 - Prefer focused changes over broad rewrites.
 - Add regression tests for bug fixes, especially page rotation, coordinate mapping, export fidelity, sizing, persistence, and dirty-state behavior.
-- Do not add dependencies when Foundation, Core Graphics, PDFKit, SwiftUI, or AppKit can solve the problem cleanly.
+- Do not add dependencies beyond the existing Sparkle updater when Foundation, Core Graphics, PDFKit, SwiftUI, or AppKit can solve the problem cleanly.
 
 ## Maintaining this file
 
