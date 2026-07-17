@@ -256,6 +256,46 @@ final class SignPDFTests: XCTestCase {
         )
     }
 
+    func testPDFPageGeometryUsesDisplayOrientationForQuarterTurnRotation() throws {
+        let sourceURL = temporaryPDFURL(named: "rotated-geometry")
+        defer { removeTemporaryFiles([sourceURL]) }
+
+        try makeSourcePDF(at: sourceURL, pageCount: 1, pageSize: CGSize(width: 842, height: 595))
+        let document = try XCTUnwrap(PDFDocument(url: sourceURL))
+        let page = try XCTUnwrap(document.page(at: 0))
+
+        page.rotation = 270
+
+        XCTAssertEqual(page.bounds(for: .mediaBox).size, CGSize(width: 842, height: 595))
+        XCTAssertEqual(PDFPageGeometry.displaySize(for: page), CGSize(width: 595, height: 842))
+
+        page.rotation = 90
+        XCTAssertEqual(PDFPageGeometry.displaySize(for: page), CGSize(width: 595, height: 842))
+
+        page.rotation = 180
+        XCTAssertEqual(PDFPageGeometry.displaySize(for: page), CGSize(width: 842, height: 595))
+    }
+
+    @MainActor
+    func testDocumentModelUsesRotatedPageDisplaySize() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-rotated-model-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "rotated-model")
+        defer { removeTemporaryFiles([rootURL, sourceURL]) }
+
+        try makeRotatedSourcePDF(
+            at: sourceURL,
+            pageSize: CGSize(width: 842, height: 595),
+            rotation: 270
+        )
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: sourceURL)
+
+        XCTAssertEqual(model.pageSize(at: 0), CGSize(width: 595, height: 842))
+        XCTAssertEqual(model.maximumPageWidth, 595)
+    }
+
     func testExporterKeepsPageCountAndSize() throws {
         let sourceURL = temporaryPDFURL(named: "source")
         let signatureURL = temporaryPDFURL(named: "signature")
@@ -290,6 +330,31 @@ final class SignPDFTests: XCTestCase {
         XCTAssertEqual(exported.page(at: 0)?.bounds(for: .mediaBox).size.width ?? 0, 595, accuracy: 0.01)
         XCTAssertEqual(exported.page(at: 0)?.bounds(for: .mediaBox).size.height ?? 0, 842, accuracy: 0.01)
         XCTAssertGreaterThan(fileSize(at: outputURL), 1_000)
+    }
+
+    func testExporterFlattensRotatedPageAtItsDisplayedSize() throws {
+        let sourceURL = temporaryPDFURL(named: "rotated-export-source")
+        let outputURL = temporaryPDFURL(named: "rotated-export-output")
+        defer { removeTemporaryFiles([sourceURL, outputURL]) }
+
+        try makeRotatedSourcePDF(
+            at: sourceURL,
+            pageSize: CGSize(width: 842, height: 595),
+            rotation: 270
+        )
+        let source = try XCTUnwrap(PDFDocument(url: sourceURL))
+
+        try PDFExporter.export(document: source, placements: [], assets: [], to: outputURL)
+
+        let exported = try XCTUnwrap(PDFDocument(url: outputURL))
+        let page = try XCTUnwrap(exported.page(at: 0))
+        XCTAssertEqual(page.rotation, 0)
+        XCTAssertEqual(page.bounds(for: .mediaBox).width, 595, accuracy: 0.01)
+        XCTAssertEqual(page.bounds(for: .mediaBox).height, 842, accuracy: 0.01)
+        XCTAssertGreaterThan(
+            darkPixelCount(in: page, thumbnailSize: CGSize(width: 595, height: 842)),
+            20
+        )
     }
 
     func testExporterDrawsSignatureOnlyOnItsAssignedPage() throws {
@@ -1003,6 +1068,17 @@ final class SignPDFTests: XCTestCase {
         context.closePDF()
     }
 
+    private func makeRotatedSourcePDF(at url: URL, pageSize: CGSize, rotation: Int) throws {
+        let unrotatedURL = temporaryPDFURL(named: "unrotated-source")
+        defer { removeTemporaryFiles([unrotatedURL]) }
+        try makeSourcePDF(at: unrotatedURL, pageCount: 1, pageSize: pageSize)
+
+        let document = try XCTUnwrap(PDFDocument(url: unrotatedURL))
+        let page = try XCTUnwrap(document.page(at: 0))
+        page.rotation = rotation
+        XCTAssertTrue(document.write(to: url))
+    }
+
     private func makeVectorSignaturePDF(at url: URL) throws {
         var mediaBox = CGRect(x: 0, y: 0, width: 500, height: 156)
         let consumer = try XCTUnwrap(CGDataConsumer(url: url as CFURL))
@@ -1028,8 +1104,11 @@ final class SignPDFTests: XCTestCase {
         context.closePDF()
     }
 
-    private func darkPixelCount(in page: PDFPage) -> Int {
-        let thumbnail = page.thumbnail(of: CGSize(width: 300, height: 200), for: .mediaBox)
+    private func darkPixelCount(
+        in page: PDFPage,
+        thumbnailSize: CGSize = CGSize(width: 300, height: 200)
+    ) -> Int {
+        let thumbnail = page.thumbnail(of: thumbnailSize, for: .mediaBox)
         guard let tiff = thumbnail.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff) else { return 0 }
         var count = 0

@@ -44,7 +44,7 @@ No third-party runtime dependencies are required.
 
 ### Download a release
 
-Download `SignPDF-1.1.0-macOS-arm64.zip` from the [GitHub Releases page](https://github.com/huwan/SignPDF-macOS/releases), unzip it, and move `SignPDF.app` to `/Applications`.
+Download `SignPDF-1.1.1-macOS-arm64.zip` from the [GitHub Releases page](https://github.com/huwan/SignPDF-macOS/releases), unzip it, and move `SignPDF.app` to `/Applications`.
 
 The prebuilt app is ad-hoc signed and is not notarized by Apple. If macOS blocks its first launch, try opening it once, then go to **System Settings > Privacy & Security** and choose **Open Anyway** for SignPDF. This approval is needed only once.
 

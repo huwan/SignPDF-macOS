@@ -66,8 +66,8 @@ struct SignatureAsset: Identifiable {
     }
 
     var aspectRatio: CGFloat {
-        let bounds = page.bounds(for: .mediaBox)
-        return bounds.width > 0 && bounds.height > 0 ? bounds.width / bounds.height : 1
+        let size = PDFPageGeometry.displaySize(for: page)
+        return size.width > 0 && size.height > 0 ? size.width / size.height : 1
     }
 
     var defaultWidthCentimeters: CGFloat {
@@ -325,7 +325,7 @@ final class DocumentModel: ObservableObject {
     private func replaceDocument(with pdf: PDFDocument, sourceURL: URL) {
         pageSizes = (0..<pdf.pageCount).map { pageIndex in
             guard let page = pdf.page(at: pageIndex) else { return Self.fallbackPageSize }
-            let size = page.bounds(for: .mediaBox).size
+            let size = PDFPageGeometry.displaySize(for: page)
             guard size.width > 0, size.height > 0,
                   size.width.isFinite, size.height.isFinite else { return Self.fallbackPageSize }
             return size

@@ -19,8 +19,7 @@ enum PDFExporter {
 
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
-            let sourceBounds = page.bounds(for: .mediaBox)
-            var outputBox = CGRect(origin: .zero, size: sourceBounds.size)
+            var outputBox = CGRect(origin: .zero, size: PDFPageGeometry.displaySize(for: page))
             let pageInfo = [kCGPDFContextMediaBox as String: NSData(bytes: &outputBox, length: MemoryLayout<CGRect>.size)] as CFDictionary
             context.beginPDFPage(pageInfo)
 
@@ -37,7 +36,7 @@ enum PDFExporter {
 
     static func draw(_ page: PDFPage, in rect: CGRect, context: CGContext) {
         guard let pageRef = page.pageRef else { return }
-        let sourceSize = page.bounds(for: .mediaBox).size
+        let sourceSize = PDFPageGeometry.displaySize(for: page)
         let fittedRect = PDFDrawingGeometry.fittedRect(sourceSize: sourceSize, in: rect)
         guard sourceSize.width > 0, sourceSize.height > 0,
               fittedRect.width > 0, fittedRect.height > 0 else { return }
@@ -54,7 +53,7 @@ enum PDFExporter {
             rotate: 0,
             preserveAspectRatio: true
         )
-        context.concatenate(normalizationTransform)
+        PDFPageGeometry.concatenate(normalizationTransform, to: context)
 
         // CGPDFPage draws the page content and obeys the manual scale above.
         // PDFPage.draw cannot be used here because it refuses to upscale and
@@ -68,6 +67,33 @@ enum PDFExporter {
             annotation.draw(with: .mediaBox, in: context)
         }
         context.restoreGState()
+    }
+}
+
+enum PDFPageGeometry {
+    static func displaySize(for page: PDFPage, box: PDFDisplayBox = .mediaBox) -> CGSize {
+        let size = page.bounds(for: box).size
+        let normalizedRotation = ((page.rotation % 360) + 360) % 360
+        if normalizedRotation == 90 || normalizedRotation == 270 {
+            return CGSize(width: size.height, height: size.width)
+        }
+        return size
+    }
+
+    static func concatenate(_ transform: CGAffineTransform, to context: CGContext) {
+        // Rebuild quarter-turn matrices through CGContext operations. Passing the
+        // exact zero-valued matrix from getDrawingTransform directly can make
+        // Quartz drop rotated page content when drawing into another PDF context.
+        let scaleX = hypot(transform.a, transform.b)
+        guard scaleX > 0, scaleX.isFinite else {
+            context.concatenate(transform)
+            return
+        }
+        let determinant = transform.a * transform.d - transform.b * transform.c
+        let scaleY = determinant / scaleX
+        context.translateBy(x: transform.tx, y: transform.ty)
+        context.rotate(by: atan2(transform.b, transform.a))
+        context.scaleBy(x: scaleX, y: scaleY)
     }
 }
 
