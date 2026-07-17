@@ -11,6 +11,7 @@ struct SignatureLibrary {
         let id: UUID
         let name: String
         let createdAt: Date
+        let defaultWidthPoints: Double?
     }
 
     let rootURL: URL
@@ -63,7 +64,8 @@ struct SignatureLibrary {
                         id: metadata.id,
                         name: metadata.name,
                         url: pdfURL(in: itemURL),
-                        document: document
+                        document: document,
+                        defaultWidthPoints: validatedDefaultWidth(metadata.defaultWidthPoints)
                       ) else {
                     skippedItemCount += 1
                     isolateCorruptItem(at: itemURL)
@@ -108,7 +110,12 @@ struct SignatureLibrary {
             try fileManager.createDirectory(at: temporaryURL, withIntermediateDirectories: false)
             try fileManager.copyItem(at: sourceURL, to: pdfURL(in: temporaryURL))
 
-            let metadata = Metadata(id: id, name: name, createdAt: Date())
+            let metadata = Metadata(
+                id: id,
+                name: name,
+                createdAt: Date(),
+                defaultWidthPoints: Double(SignatureSizing.defaultWidthPoints)
+            )
             let metadataData = try JSONEncoder().encode(metadata)
             try metadataData.write(to: metadataURL(in: temporaryURL), options: .atomic)
 
@@ -127,7 +134,8 @@ struct SignatureLibrary {
                     id: id,
                     name: name,
                     url: pdfURL(in: destinationURL),
-                    document: storedDocument
+                    document: storedDocument,
+                    defaultWidthPoints: SignatureSizing.defaultWidthPoints
                   ) else {
                 throw SignPDFError.cannotReadPDF(sourceURL.lastPathComponent)
             }
@@ -155,6 +163,33 @@ struct SignatureLibrary {
         try? fileManager.removeItem(at: tombstoneURL)
     }
 
+    func updateDefaultWidth(_ width: CGFloat, for asset: SignatureAsset) throws {
+        try prepareRootDirectory()
+        guard asset.isInLibrary, SignatureSizing.isValid(points: width) else {
+            throw SignPDFError.invalidSignatureWidth
+        }
+
+        let destinationURL = itemURL(for: asset.id)
+        guard asset.url.standardizedFileURL.deletingLastPathComponent()
+                == destinationURL.standardizedFileURL,
+              fileManager.fileExists(atPath: destinationURL.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let metadataFileURL = metadataURL(in: destinationURL)
+        let metadataData = try Data(contentsOf: metadataFileURL)
+        let metadata = try JSONDecoder().decode(Metadata.self, from: metadataData)
+        guard metadata.id == asset.id else { throw CocoaError(.fileReadCorruptFile) }
+
+        let updated = Metadata(
+            id: metadata.id,
+            name: metadata.name,
+            createdAt: metadata.createdAt,
+            defaultWidthPoints: Double(width)
+        )
+        try JSONEncoder().encode(updated).write(to: metadataFileURL, options: .atomic)
+    }
+
     private func prepareRootDirectory() throws {
         try fileManager.createDirectory(
             at: rootURL,
@@ -173,6 +208,14 @@ struct SignatureLibrary {
 
     private func metadataURL(in itemURL: URL) -> URL {
         itemURL.appendingPathComponent("metadata.json", isDirectory: false)
+    }
+
+    private func validatedDefaultWidth(_ storedValue: Double?) -> CGFloat {
+        guard let storedValue else { return SignatureSizing.defaultWidthPoints }
+        let width = CGFloat(storedValue)
+        return SignatureSizing.isValid(points: width)
+            ? width
+            : SignatureSizing.defaultWidthPoints
     }
 
     private func removeAbandonedWorkingDirectories() {

@@ -355,6 +355,343 @@ final class SignPDFTests: XCTestCase {
         XCTAssertGreaterThan(darkPixelCount(in: exportedPage), 20)
     }
 
+    func testSignatureSizingConvertsCentimetersAndPDFPointsExactly() {
+        XCTAssertEqual(SignatureSizing.defaultWidthCentimeters, 3.6, accuracy: 0.000_001)
+        XCTAssertEqual(SignatureSizing.pointsPerCentimeter, 72 / 2.54, accuracy: 0.000_001)
+
+        let widthInPoints = SignatureSizing.points(fromCentimeters: 3.6)
+        XCTAssertEqual(widthInPoints, 3.6 * 72 / 2.54, accuracy: 0.000_001)
+        XCTAssertEqual(
+            SignatureSizing.centimeters(fromPoints: widthInPoints),
+            3.6,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testSignatureSizingRejectsImpracticalAndNonfiniteWidths() {
+        XCTAssertNotNil(SignatureSizing.validPoints(
+            fromCentimeters: SignatureSizing.minimumWidthCentimeters
+        ))
+        XCTAssertNotNil(SignatureSizing.validPoints(
+            fromCentimeters: SignatureSizing.maximumWidthCentimeters
+        ))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: 0))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: -1))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: 0.49))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: 100.01))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: .nan))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: .infinity))
+        XCTAssertNil(SignatureSizing.validPoints(fromCentimeters: -.infinity))
+    }
+
+    func testSignatureWidthTextRoundTripsLocalizedNumbersAndRejectsTrailingText() throws {
+        for identifier in ["en_US", "de_DE", "ar_EG", "fa_IR"] {
+            let locale = Locale(identifier: identifier)
+            let text = SignatureWidthText.string(from: 3.6, locale: locale)
+            let parsed = try XCTUnwrap(SignatureWidthText.centimeters(from: text, locale: locale))
+            XCTAssertEqual(parsed, 3.6, accuracy: 0.000_001, identifier)
+        }
+
+        let asciiParsed = try XCTUnwrap(SignatureWidthText.centimeters(
+            from: "3.6",
+            locale: Locale(identifier: "de_DE")
+        ))
+        XCTAssertEqual(asciiParsed, 3.6, accuracy: 0.000_001)
+        XCTAssertNil(SignatureWidthText.centimeters(from: "3.6 cm"))
+    }
+
+    func testSignatureGeometryRejectsFiniteValuesThatUnderflow() {
+        XCTAssertNil(PlacementGeometry.signatureSize(
+            requestedWidth: CGFloat.leastNonzeroMagnitude,
+            aspectRatio: CGFloat.greatestFiniteMagnitude,
+            pageSize: CGSize(width: 600, height: 800)
+        ))
+    }
+
+    func testLegacySignatureMetadataUsesDefaultWidth() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-legacy-library-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "legacy-signature")
+        defer { removeTemporaryFiles([rootURL, sourceURL]) }
+
+        try makeVectorSignaturePDF(at: sourceURL)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+        let id = UUID()
+        let itemURL = rootURL.appendingPathComponent(id.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: itemURL, withIntermediateDirectories: false)
+        try FileManager.default.copyItem(
+            at: sourceURL,
+            to: itemURL.appendingPathComponent("signature.pdf")
+        )
+        let legacyMetadata = LegacySignatureMetadata(
+            id: id,
+            name: "Legacy",
+            createdAt: Date(timeIntervalSinceReferenceDate: 1_000)
+        )
+        try JSONEncoder().encode(legacyMetadata).write(
+            to: itemURL.appendingPathComponent("metadata.json"),
+            options: .atomic
+        )
+
+        let result = try SignatureLibrary(rootURL: rootURL).load()
+        let asset = try XCTUnwrap(result.assets.first)
+
+        XCTAssertEqual(result.assets.count, 1)
+        XCTAssertEqual(result.skippedItemCount, 0)
+        XCTAssertEqual(asset.id, id)
+        XCTAssertEqual(
+            asset.defaultWidthPoints,
+            SignatureSizing.points(fromCentimeters: 3.6),
+            accuracy: 0.000_001
+        )
+    }
+
+    @MainActor
+    func testSignatureDefaultWidthPersistsPerAsset() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-width-library-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "width-signature")
+        defer { removeTemporaryFiles([rootURL, sourceURL]) }
+
+        try makeVectorSignaturePDF(at: sourceURL)
+        let library = SignatureLibrary(rootURL: rootURL)
+        let firstImported = try library.importSignature(from: sourceURL, name: "First")
+        let secondImported = try library.importSignature(from: sourceURL, name: "Second")
+        let model = DocumentModel(signatureLibrary: library)
+        let first = try XCTUnwrap(model.libraryAssets.first { $0.id == firstImported.id })
+
+        XCTAssertTrue(model.updateDefaultWidth(for: first, toCentimeters: 2.75))
+
+        let updatedFirst = try XCTUnwrap(model.libraryAssets.first { $0.id == firstImported.id })
+        let unchangedSecond = try XCTUnwrap(model.libraryAssets.first { $0.id == secondImported.id })
+        XCTAssertEqual(
+            SignatureSizing.centimeters(fromPoints: updatedFirst.defaultWidthPoints),
+            2.75,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            SignatureSizing.centimeters(fromPoints: unchangedSecond.defaultWidthPoints),
+            SignatureSizing.defaultWidthCentimeters,
+            accuracy: 0.000_001
+        )
+
+        let reloaded = DocumentModel(signatureLibrary: library)
+        let restoredFirst = try XCTUnwrap(reloaded.libraryAssets.first { $0.id == firstImported.id })
+        let restoredSecond = try XCTUnwrap(reloaded.libraryAssets.first { $0.id == secondImported.id })
+        XCTAssertEqual(
+            SignatureSizing.centimeters(fromPoints: restoredFirst.defaultWidthPoints),
+            2.75,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            SignatureSizing.centimeters(fromPoints: restoredSecond.defaultWidthPoints),
+            SignatureSizing.defaultWidthCentimeters,
+            accuracy: 0.000_001
+        )
+    }
+
+    @MainActor
+    func testDefaultWidthWriteFailureLeavesInMemoryAssetUnchanged() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-width-failure-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = temporaryPDFURL(named: "width-failure-signature")
+        defer { removeTemporaryFiles([rootURL, sourceURL]) }
+
+        try makeVectorSignaturePDF(at: sourceURL)
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.importSignatures(urls: [sourceURL])
+        let imported = try XCTUnwrap(model.libraryAssets.first)
+        let originalWidth = imported.defaultWidthPoints
+        try FileManager.default.removeItem(
+            at: imported.url.deletingLastPathComponent().appendingPathComponent("metadata.json")
+        )
+
+        XCTAssertFalse(model.updateDefaultWidth(for: imported, toCentimeters: 4.25))
+        XCTAssertEqual(model.libraryAssets.first?.defaultWidthPoints, originalWidth)
+        XCTAssertTrue(model.alertMessage?.contains("默认宽度") == true)
+    }
+
+    @MainActor
+    func testConfiguredDefaultWidthIsUsedForExactInsertion() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-insertion-width-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "insertion-width-document")
+        let signatureURL = temporaryPDFURL(named: "insertion-width-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 600, height: 800))
+        try makeVectorSignaturePDF(at: signatureURL)
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let imported = try XCTUnwrap(model.libraryAssets.first)
+        let fallbackRect = model.proposedSignatureRect(
+            for: imported,
+            centeredAt: CGPoint(x: 300, y: 400)
+        )
+        XCTAssertEqual(
+            fallbackRect.width,
+            SignatureSizing.points(fromCentimeters: SignatureSizing.defaultWidthCentimeters),
+            accuracy: 0.000_001
+        )
+
+        XCTAssertTrue(model.updateDefaultWidth(for: imported, toCentimeters: 2.75))
+        let configured = try XCTUnwrap(model.libraryAssets.first { $0.id == imported.id })
+
+        model.addSignature(configured, centeredAt: CGPoint(x: 300, y: 400))
+        let placement = try XCTUnwrap(model.selectedPlacement)
+        let expectedWidth = SignatureSizing.points(fromCentimeters: 2.75)
+
+        XCTAssertEqual(placement.rect.width, expectedWidth, accuracy: 0.000_001)
+        XCTAssertEqual(placement.rect.height, expectedWidth / configured.aspectRatio, accuracy: 0.000_001)
+        XCTAssertEqual(placement.rect.midX, 300, accuracy: 0.000_001)
+        XCTAssertEqual(placement.rect.midY, 400, accuracy: 0.000_001)
+    }
+
+    @MainActor
+    func testExactPlacementResizePreservesAspectRatioAndClampsToPage() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-resize-width-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "resize-width-document")
+        let signatureURL = temporaryPDFURL(named: "resize-width-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        let pageSize = CGSize(width: 300, height: 200)
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: pageSize)
+        try makeVectorSignaturePDF(at: signatureURL)
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let asset = try XCTUnwrap(model.libraryAssets.first)
+        model.addSignature(asset, centeredAt: CGPoint(x: 150, y: 100))
+        let original = try XCTUnwrap(model.selectedPlacement)
+        let placementID = original.id
+
+        XCTAssertTrue(model.resizePlacement(id: placementID, toWidthCentimeters: 4.25))
+        let exact = try XCTUnwrap(model.selectedPlacement)
+        let exactWidth = SignatureSizing.points(fromCentimeters: 4.25)
+        XCTAssertEqual(exact.rect.width, exactWidth, accuracy: 0.000_001)
+        XCTAssertEqual(exact.rect.height, exactWidth / asset.aspectRatio, accuracy: 0.000_001)
+        XCTAssertEqual(exact.rect.minX, original.rect.minX, accuracy: 0.000_001)
+        XCTAssertEqual(exact.rect.maxY, original.rect.maxY, accuracy: 0.000_001)
+
+        model.markCurrentSignatureLayoutAsHandled()
+        XCTAssertFalse(model.resizePlacement(id: placementID, toWidthCentimeters: 100))
+        XCTAssertEqual(model.selectedPlacement?.rect, exact.rect)
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        let clamped = try XCTUnwrap(PlacementGeometry.resizedSignatureRect(
+            exact.rect,
+            requestedWidth: SignatureSizing.points(fromCentimeters: 100),
+            aspectRatio: asset.aspectRatio,
+            pageSize: pageSize
+        ))
+        let maximumAspectPreservingWidth = min(pageSize.width, pageSize.height * asset.aspectRatio)
+        XCTAssertEqual(clamped.width, maximumAspectPreservingWidth, accuracy: 0.000_001)
+        XCTAssertEqual(
+            clamped.width / clamped.height,
+            asset.aspectRatio,
+            accuracy: 0.000_001
+        )
+        XCTAssertGreaterThanOrEqual(clamped.minX, 0)
+        XCTAssertGreaterThanOrEqual(clamped.minY, 0)
+        XCTAssertLessThanOrEqual(clamped.maxX, pageSize.width)
+        XCTAssertLessThanOrEqual(clamped.maxY, pageSize.height)
+    }
+
+    @MainActor
+    func testSavingSelectedWidthAsDefaultPersistsWithoutChangingDocumentDirtyState() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-current-default-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "current-default-document")
+        let signatureURL = temporaryPDFURL(named: "current-default-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 600, height: 800))
+        try makeVectorSignaturePDF(at: signatureURL)
+        let library = SignatureLibrary(rootURL: rootURL)
+        let model = DocumentModel(signatureLibrary: library)
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let asset = try XCTUnwrap(model.libraryAssets.first)
+        model.addSignature(asset, centeredAt: CGPoint(x: 300, y: 400))
+        let placementID = try XCTUnwrap(model.selectedPlacementID)
+        model.markCurrentSignatureLayoutAsHandled()
+        XCTAssertFalse(model.hasUnsavedChanges)
+        XCTAssertTrue(model.resizePlacement(id: placementID, toWidthCentimeters: 4.25))
+        XCTAssertTrue(model.hasUnsavedChanges)
+        model.markCurrentSignatureLayoutAsHandled()
+        let placementBeforeSaving = try XCTUnwrap(model.selectedPlacement)
+
+        XCTAssertTrue(model.saveSelectedPlacementWidthAsDefault())
+        XCTAssertEqual(model.selectedPlacement, placementBeforeSaving)
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        let reloaded = DocumentModel(signatureLibrary: library)
+        let restored = try XCTUnwrap(reloaded.libraryAssets.first { $0.id == asset.id })
+        XCTAssertEqual(restored.defaultWidthCentimeters, 4.25, accuracy: 0.000_001)
+    }
+
+    @MainActor
+    func testExactWidthActionsDisableWhenPageCannotFitMinimumWidth() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-tiny-fit-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "tiny-fit-document")
+        let signatureURL = temporaryPDFURL(named: "tiny-fit-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 600, height: 800))
+        try makeSourcePDF(at: signatureURL, pageCount: 1, pageSize: CGSize(width: 1, height: 1_000))
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let asset = try XCTUnwrap(model.libraryAssets.first)
+        model.addSignature(asset, centeredAt: CGPoint(x: 300, y: 400))
+        let placement = try XCTUnwrap(model.selectedPlacement)
+
+        XCTAssertLessThan(
+            SignatureSizing.centimeters(fromPoints: placement.rect.width),
+            SignatureSizing.minimumWidthCentimeters
+        )
+        XCTAssertFalse(model.canEditSelectedPlacementWidth)
+        XCTAssertFalse(model.canSaveSelectedWidthAsDefault)
+    }
+
+    @MainActor
+    func testDeletingLibrarySignatureKeepsItsConfiguredWidthOnDetachedAsset() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SignPDF-detached-width-\(UUID().uuidString)", isDirectory: true)
+        let documentURL = temporaryPDFURL(named: "detached-width-document")
+        let signatureURL = temporaryPDFURL(named: "detached-width-signature")
+        defer { removeTemporaryFiles([rootURL, documentURL, signatureURL]) }
+
+        try makeSourcePDF(at: documentURL, pageCount: 1, pageSize: CGSize(width: 600, height: 800))
+        try makeVectorSignaturePDF(at: signatureURL)
+
+        let model = DocumentModel(signatureLibrary: SignatureLibrary(rootURL: rootURL))
+        model.open(url: documentURL)
+        model.importSignatures(urls: [signatureURL])
+        let imported = try XCTUnwrap(model.libraryAssets.first)
+        XCTAssertTrue(model.updateDefaultWidth(for: imported, toCentimeters: 2.25))
+        let configured = try XCTUnwrap(model.libraryAssets.first { $0.id == imported.id })
+        model.addSignature(configured, centeredAt: CGPoint(x: 300, y: 400))
+
+        model.deleteAsset(imported)
+
+        XCTAssertTrue(model.libraryAssets.isEmpty)
+        let placement = try XCTUnwrap(model.placements.first)
+        let detached = try XCTUnwrap(model.asset(for: placement))
+        XCTAssertFalse(detached.isInLibrary)
+        XCTAssertEqual(
+            SignatureSizing.centimeters(fromPoints: detached.defaultWidthPoints),
+            2.25,
+            accuracy: 0.000_001
+        )
+    }
+
     @MainActor
     func testSignatureLibraryPersistsAndDeletesImportedSignature() throws {
         let rootURL = FileManager.default.temporaryDirectory
@@ -526,7 +863,7 @@ final class SignPDFTests: XCTestCase {
             for: tallAsset,
             centeredAt: CGPoint(x: 300, y: 400)
         )
-        XCTAssertLessThanOrEqual(tallRect.height, 800 * 0.35 + 0.001)
+        XCTAssertLessThanOrEqual(tallRect.height, 800 + 0.001)
         XCTAssertEqual(tallRect.width / tallRect.height, tallAsset.aspectRatio, accuracy: 0.001)
 
         model.beginPlacingSignature(asset)
@@ -721,5 +1058,11 @@ final class SignPDFTests: XCTestCase {
     private func fileSize(at url: URL) -> Int {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return (attributes?[.size] as? NSNumber)?.intValue ?? 0
+    }
+
+    private struct LegacySignatureMetadata: Codable {
+        let id: UUID
+        let name: String
+        let createdAt: Date
     }
 }

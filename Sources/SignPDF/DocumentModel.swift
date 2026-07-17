@@ -2,12 +2,47 @@ import AppKit
 import PDFKit
 import SwiftUI
 
+enum SignatureSizing {
+    static let pointsPerCentimeter: CGFloat = 72 / 2.54
+    static let minimumWidthCentimeters: CGFloat = 0.5
+    static let maximumWidthCentimeters: CGFloat = 100
+    static let widthComparisonToleranceCentimeters: CGFloat = 0.000_5
+    static let defaultWidthCentimeters: CGFloat = 3.6
+    static let defaultWidthPoints = defaultWidthCentimeters * pointsPerCentimeter
+    static let minimumWidthPoints = minimumWidthCentimeters * pointsPerCentimeter
+    static let maximumWidthPoints = maximumWidthCentimeters * pointsPerCentimeter
+
+    static func points(fromCentimeters centimeters: CGFloat) -> CGFloat {
+        centimeters * pointsPerCentimeter
+    }
+
+    static func centimeters(fromPoints points: CGFloat) -> CGFloat {
+        points / pointsPerCentimeter
+    }
+
+    static func validPoints(fromCentimeters centimeters: CGFloat) -> CGFloat? {
+        guard centimeters.isFinite,
+              centimeters >= minimumWidthCentimeters,
+              centimeters <= maximumWidthCentimeters else { return nil }
+        let points = points(fromCentimeters: centimeters)
+        return isValid(points: points) ? points : nil
+    }
+
+    static func isValid(points: CGFloat) -> Bool {
+        guard points.isFinite else { return false }
+        let centimeters = centimeters(fromPoints: points)
+        return centimeters >= minimumWidthCentimeters
+            && centimeters <= maximumWidthCentimeters
+    }
+}
+
 struct SignatureAsset: Identifiable {
     let id: UUID
     let name: String
     let url: URL
     let document: PDFDocument
     let page: PDFPage
+    let defaultWidthPoints: CGFloat
     let isInLibrary: Bool
 
     init?(
@@ -15,6 +50,7 @@ struct SignatureAsset: Identifiable {
         name: String,
         url: URL,
         document: PDFDocument,
+        defaultWidthPoints: CGFloat = SignatureSizing.defaultWidthPoints,
         isInLibrary: Bool = true
     ) {
         guard let page = document.page(at: 0) else { return nil }
@@ -23,12 +59,30 @@ struct SignatureAsset: Identifiable {
         self.url = url
         self.document = document
         self.page = page
+        self.defaultWidthPoints = SignatureSizing.isValid(points: defaultWidthPoints)
+            ? defaultWidthPoints
+            : SignatureSizing.defaultWidthPoints
         self.isInLibrary = isInLibrary
     }
 
     var aspectRatio: CGFloat {
         let bounds = page.bounds(for: .mediaBox)
         return bounds.width > 0 && bounds.height > 0 ? bounds.width / bounds.height : 1
+    }
+
+    var defaultWidthCentimeters: CGFloat {
+        SignatureSizing.centimeters(fromPoints: defaultWidthPoints)
+    }
+
+    func replacingDefaultWidthPoints(_ width: CGFloat) -> SignatureAsset? {
+        SignatureAsset(
+            id: id,
+            name: name,
+            url: url,
+            document: document,
+            defaultWidthPoints: width,
+            isInLibrary: isInLibrary
+        )
     }
 }
 
@@ -95,7 +149,11 @@ enum SignPDFError: LocalizedError {
     case signatureMustBeSinglePage(String)
     case cannotLoadSignatures
     case cannotSaveSignature(String)
+    case cannotUpdateSignature(String)
     case cannotDeleteSignature(String)
+    case invalidSignatureWidth
+    case signatureWidthDoesNotFitPage
+    case invalidSignatureGeometry(String)
     case cannotCreateOutput
     case cannotWriteOutput
 
@@ -105,7 +163,14 @@ enum SignPDFError: LocalizedError {
         case .signatureMustBeSinglePage(let name): return "签名 PDF 必须只有一页：\(name)"
         case .cannotLoadSignatures: return "无法读取已保存的签名库。"
         case .cannotSaveSignature(let name): return "无法保存签名：\(name)"
+        case .cannotUpdateSignature(let name): return "无法保存“\(name)”的默认宽度。"
         case .cannotDeleteSignature(let name): return "无法删除签名：\(name)"
+        case .invalidSignatureWidth:
+            return "签名宽度必须在 0.5 到 100 cm 之间。"
+        case .signatureWidthDoesNotFitPage:
+            return "输入的签名宽度无法完整放入当前页面。"
+        case .invalidSignatureGeometry(let name):
+            return "无法计算签名“\(name)”的页面尺寸。"
         case .cannotCreateOutput: return "无法创建输出 PDF。"
         case .cannotWriteOutput: return "写入 PDF 时发生错误。"
         }
@@ -158,6 +223,47 @@ final class DocumentModel: ObservableObject {
     var pendingSignatureAsset: SignatureAsset? {
         guard let pendingSignatureAssetID else { return nil }
         return assets.first { $0.id == pendingSignatureAssetID }
+    }
+
+    var selectedPlacement: SignaturePlacement? {
+        guard let selectedPlacementID else { return nil }
+        return placements.first { $0.id == selectedPlacementID }
+    }
+
+    var selectedSignatureAsset: SignatureAsset? {
+        guard let selectedPlacement else { return nil }
+        return asset(for: selectedPlacement)
+    }
+
+    var selectedPlacementWidthCentimeters: CGFloat? {
+        selectedPlacement.map { SignatureSizing.centimeters(fromPoints: $0.rect.width) }
+    }
+
+    var canSaveSelectedWidthAsDefault: Bool {
+        selectedSignatureAsset?.isInLibrary == true
+            && selectedPlacement.map { SignatureSizing.isValid(points: $0.rect.width) } == true
+    }
+
+    var canEditSelectedPlacementWidth: Bool {
+        guard let placement = selectedPlacement,
+              let maximumWidth = maximumPlacementWidthCentimeters(id: placement.id) else {
+            return false
+        }
+        return maximumWidth + SignatureSizing.widthComparisonToleranceCentimeters
+            >= SignatureSizing.minimumWidthCentimeters
+    }
+
+    func maximumPlacementWidthCentimeters(id: UUID) -> CGFloat? {
+        guard let placement = placements.first(where: { $0.id == id }),
+              let asset = asset(for: placement),
+              let maximumWidth = PlacementGeometry.maximumSignatureWidth(
+                aspectRatio: asset.aspectRatio,
+                pageSize: pageSize(at: placement.pageIndex)
+              ) else { return nil }
+        return min(
+            SignatureSizing.maximumWidthCentimeters,
+            SignatureSizing.centimeters(fromPoints: maximumWidth)
+        )
     }
 
     var currentPDFPage: PDFPage? {
@@ -337,8 +443,14 @@ final class DocumentModel: ObservableObject {
 
     func addSignature(_ asset: SignatureAsset, centeredAt pagePoint: CGPoint, onPage pageIndex: Int) {
         guard pageIndex >= 0, pageIndex < pageCount else { return }
-        let rect = proposedSignatureRect(for: asset, centeredAt: pagePoint, onPage: pageIndex)
-        let placement = SignaturePlacement(assetID: asset.id, pageIndex: pageIndex, rect: rect)
+        guard let currentAsset = assets.first(where: { $0.id == asset.id }) else { return }
+        let rect = proposedSignatureRect(for: currentAsset, centeredAt: pagePoint, onPage: pageIndex)
+        guard rect.width.isFinite, rect.width > 0,
+              rect.height.isFinite, rect.height > 0 else {
+            present(SignPDFError.invalidSignatureGeometry(currentAsset.name))
+            return
+        }
+        let placement = SignaturePlacement(assetID: currentAsset.id, pageIndex: pageIndex, rect: rect)
         placements.append(placement)
         currentPage = pageIndex
         selectedPlacementID = placement.id
@@ -355,19 +467,12 @@ final class DocumentModel: ObservableObject {
         onPage pageIndex: Int
     ) -> CGRect {
         let pageSize = pageSize(at: pageIndex)
-        let width = min(
-            150.0,
-            pageSize.width * 0.35,
-            pageSize.height * 0.35 * max(asset.aspectRatio, 0.001)
-        )
-        let height = width / asset.aspectRatio
-        let rect = CGRect(
-            x: pagePoint.x - width / 2,
-            y: pagePoint.y - height / 2,
-            width: width,
-            height: height
-        )
-        return PlacementGeometry.clamped(rect, to: pageSize)
+        return PlacementGeometry.signatureRect(
+            centeredAt: pagePoint,
+            requestedWidth: asset.defaultWidthPoints,
+            aspectRatio: asset.aspectRatio,
+            pageSize: pageSize
+        ) ?? .zero
     }
 
     func asset(for placement: SignaturePlacement) -> SignatureAsset? {
@@ -387,43 +492,107 @@ final class DocumentModel: ObservableObject {
         purgeUnusedDetachedAssets()
     }
 
-    func deleteAsset(_ asset: SignatureAsset) {
+    @discardableResult
+    func resizePlacement(id: UUID, toWidthCentimeters centimeters: CGFloat) -> Bool {
+        guard let width = SignatureSizing.validPoints(fromCentimeters: centimeters) else {
+            present(SignPDFError.invalidSignatureWidth)
+            return false
+        }
+        guard let index = placements.firstIndex(where: { $0.id == id }),
+              let asset = asset(for: placements[index]),
+              let maximumWidth = PlacementGeometry.maximumSignatureWidth(
+                aspectRatio: asset.aspectRatio,
+                pageSize: pageSize(at: placements[index].pageIndex)
+              ) else { return false }
+        guard width <= maximumWidth + SignatureSizing.points(
+            fromCentimeters: SignatureSizing.widthComparisonToleranceCentimeters
+        ) else {
+            present(SignPDFError.signatureWidthDoesNotFitPage)
+            return false
+        }
+        guard let resized = PlacementGeometry.resizedSignatureRect(
+                placements[index].rect,
+                requestedWidth: width,
+                aspectRatio: asset.aspectRatio,
+                pageSize: pageSize(at: placements[index].pageIndex)
+              ) else { return false }
+        placements[index].rect = resized
+        return true
+    }
+
+    @discardableResult
+    func updateDefaultWidth(for asset: SignatureAsset, toCentimeters centimeters: CGFloat) -> Bool {
+        guard let width = SignatureSizing.validPoints(fromCentimeters: centimeters) else {
+            present(SignPDFError.invalidSignatureWidth)
+            return false
+        }
+        guard let index = assets.firstIndex(where: { $0.id == asset.id }),
+              assets[index].isInLibrary,
+              let updatedAsset = assets[index].replacingDefaultWidthPoints(width) else {
+            return false
+        }
+
         do {
-            let isUsedInDocument = placements.contains { $0.assetID == asset.id }
+            try signatureLibrary.updateDefaultWidth(width, for: assets[index])
+            assets[index] = updatedAsset
+            return true
+        } catch {
+            present(SignPDFError.cannotUpdateSignature(asset.name))
+            return false
+        }
+    }
+
+    @discardableResult
+    func saveSelectedPlacementWidthAsDefault() -> Bool {
+        guard let placement = selectedPlacement,
+              let asset = asset(for: placement),
+              asset.isInLibrary else { return false }
+        return updateDefaultWidth(
+            for: asset,
+            toCentimeters: SignatureSizing.centimeters(fromPoints: placement.rect.width)
+        )
+    }
+
+    func deleteAsset(_ asset: SignatureAsset) {
+        guard let currentAsset = assets.first(where: { $0.id == asset.id }),
+              currentAsset.isInLibrary else { return }
+        do {
+            let isUsedInDocument = placements.contains { $0.assetID == currentAsset.id }
             let detachedAsset: SignatureAsset?
             if isUsedInDocument {
-                let detachedData = asset.document.dataRepresentation()
-                    ?? (try? Data(contentsOf: asset.url))
+                let detachedData = currentAsset.document.dataRepresentation()
+                    ?? (try? Data(contentsOf: currentAsset.url))
                 guard let detachedData,
                       let document = PDFDocument(data: detachedData),
                       let detached = SignatureAsset(
-                        id: asset.id,
-                        name: asset.name,
-                        url: asset.url,
+                        id: currentAsset.id,
+                        name: currentAsset.name,
+                        url: currentAsset.url,
                         document: document,
+                        defaultWidthPoints: currentAsset.defaultWidthPoints,
                         isInLibrary: false
                       ) else {
-                    throw SignPDFError.cannotReadPDF(asset.name)
+                    throw SignPDFError.cannotReadPDF(currentAsset.name)
                 }
                 detachedAsset = detached
             } else {
                 detachedAsset = nil
             }
 
-            try signatureLibrary.delete(asset)
+            try signatureLibrary.delete(currentAsset)
 
-            if pendingSignatureAssetID == asset.id {
+            if pendingSignatureAssetID == currentAsset.id {
                 pendingSignatureAssetID = nil
             }
 
-            if let index = assets.firstIndex(where: { $0.id == asset.id }),
+            if let index = assets.firstIndex(where: { $0.id == currentAsset.id }),
                let detachedAsset {
                 assets[index] = detachedAsset
             } else {
-                assets.removeAll { $0.id == asset.id }
+                assets.removeAll { $0.id == currentAsset.id }
             }
         } catch {
-            present(SignPDFError.cannotDeleteSignature(asset.name))
+            present(SignPDFError.cannotDeleteSignature(currentAsset.name))
         }
     }
 

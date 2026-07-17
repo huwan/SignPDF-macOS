@@ -311,17 +311,23 @@ final class PDFCanvasView: NSView {
         var updated = original
 
         if isResizing, let asset = model.asset(for: original) {
-            let newWidth = max(24, original.rect.width + dx)
-            let newHeight = newWidth / asset.aspectRatio
-            let top = original.rect.maxY
-            updated.rect.size = CGSize(width: newWidth, height: newHeight)
-            updated.rect.origin.y = top - newHeight
+            let newWidth = min(
+                SignatureSizing.maximumWidthPoints,
+                max(SignatureSizing.minimumWidthPoints, original.rect.width + dx)
+            )
+            guard let resized = PlacementGeometry.resizedSignatureRect(
+                original.rect,
+                requestedWidth: newWidth,
+                aspectRatio: asset.aspectRatio,
+                pageSize: pageSize
+            ) else { return }
+            updated.rect = resized
         } else {
             updated.rect.origin.x += dx
             updated.rect.origin.y -= dy
+            updated.rect = PlacementGeometry.clamped(updated.rect, to: pageSize)
         }
 
-        updated.rect = PlacementGeometry.clamped(updated.rect, to: pageSize)
         model.placements[index] = updated
         needsDisplay = true
     }
@@ -413,10 +419,98 @@ final class PDFCanvasView: NSView {
 }
 
 enum PlacementGeometry {
+    static func maximumSignatureWidth(
+        aspectRatio: CGFloat,
+        pageSize: CGSize
+    ) -> CGFloat? {
+        guard aspectRatio.isFinite, aspectRatio > 0,
+              pageSize.width.isFinite, pageSize.width > 0,
+              pageSize.height.isFinite, pageSize.height > 0 else { return nil }
+        let heightLimitedWidth = pageSize.height * aspectRatio
+        let maximumWidth = heightLimitedWidth.isFinite
+            ? min(pageSize.width, heightLimitedWidth)
+            : pageSize.width
+        return maximumWidth.isFinite && maximumWidth > 0 ? maximumWidth : nil
+    }
+
+    static func signatureSize(
+        requestedWidth: CGFloat,
+        aspectRatio: CGFloat,
+        pageSize: CGSize
+    ) -> CGSize? {
+        guard requestedWidth.isFinite, requestedWidth > 0,
+              let maximumWidth = maximumSignatureWidth(
+                aspectRatio: aspectRatio,
+                pageSize: pageSize
+              ) else { return nil }
+        let width = min(requestedWidth, maximumWidth)
+        let height = width / aspectRatio
+        guard width.isFinite, width > 0,
+              height.isFinite, height > 0 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    static func signatureRect(
+        centeredAt point: CGPoint,
+        requestedWidth: CGFloat,
+        aspectRatio: CGFloat,
+        pageSize: CGSize
+    ) -> CGRect? {
+        guard point.x.isFinite, point.y.isFinite,
+              let size = signatureSize(
+                requestedWidth: requestedWidth,
+                aspectRatio: aspectRatio,
+                pageSize: pageSize
+              ) else { return nil }
+        let rect = CGRect(
+            x: point.x - size.width / 2,
+            y: point.y - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let positioned = clampedPosition(rect, to: pageSize)
+        guard positioned.minX.isFinite, positioned.minY.isFinite,
+              positioned.width.isFinite, positioned.width > 0,
+              positioned.height.isFinite, positioned.height > 0 else { return nil }
+        return positioned
+    }
+
+    static func resizedSignatureRect(
+        _ rect: CGRect,
+        requestedWidth: CGFloat,
+        aspectRatio: CGFloat,
+        pageSize: CGSize
+    ) -> CGRect? {
+        guard rect.minX.isFinite, rect.maxY.isFinite,
+              let size = signatureSize(
+                requestedWidth: requestedWidth,
+                aspectRatio: aspectRatio,
+                pageSize: pageSize
+              ) else { return nil }
+        let resized = CGRect(
+            x: rect.minX,
+            y: rect.maxY - size.height,
+            width: size.width,
+            height: size.height
+        )
+        let positioned = clampedPosition(resized, to: pageSize)
+        guard positioned.minX.isFinite, positioned.minY.isFinite,
+              positioned.width.isFinite, positioned.width > 0,
+              positioned.height.isFinite, positioned.height > 0 else { return nil }
+        return positioned
+    }
+
     static func clamped(_ rect: CGRect, to pageSize: CGSize) -> CGRect {
         var result = rect
         result.size.width = min(max(1, result.width), pageSize.width)
         result.size.height = min(max(1, result.height), pageSize.height)
+        result.origin.x = min(max(0, result.minX), pageSize.width - result.width)
+        result.origin.y = min(max(0, result.minY), pageSize.height - result.height)
+        return result
+    }
+
+    private static func clampedPosition(_ rect: CGRect, to pageSize: CGSize) -> CGRect {
+        var result = rect
         result.origin.x = min(max(0, result.minX), pageSize.width - result.width)
         result.origin.y = min(max(0, result.minY), pageSize.height - result.height)
         return result

@@ -5,6 +5,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: DocumentModel
     @GestureState private var pinchScale: CGFloat = 1
+    @State private var placementWidthEditor: PlacementWidthEditorRequest?
 
     var body: some View {
         NavigationSplitView {
@@ -25,6 +26,21 @@ struct ContentView: View {
         }
         .onExitCommand {
             model.cancelSignaturePlacement()
+        }
+        .sheet(item: $placementWidthEditor) { request in
+            SignatureWidthEditorSheet(
+                title: "设置签名宽度",
+                signatureName: request.signatureName,
+                initialCentimeters: request.initialCentimeters,
+                maximumCentimeters: request.maximumCentimeters,
+                explanation: "精确调整当前实例；不会改变这个签名以后插入时的默认宽度。",
+                actionTitle: "应用"
+            ) { centimeters in
+                model.resizePlacement(
+                    id: request.placementID,
+                    toWidthCentimeters: centimeters
+                )
+            }
         }
     }
 
@@ -147,6 +163,25 @@ struct ContentView: View {
             }
             .disabled(model.selectedPlacementID == nil)
             .help("删除所选签名")
+            Menu {
+                Button("精确设置宽度…", systemImage: "ruler") {
+                    editSelectedPlacementWidth()
+                }
+                Button("将当前宽度设为默认", systemImage: "arrow.down.to.line") {
+                    model.saveSelectedPlacementWidthAsDefault()
+                }
+                .disabled(!model.canSaveSelectedWidthAsDefault)
+            } label: {
+                Label("签名尺寸", systemImage: "ruler")
+            }
+            .disabled(!model.canEditSelectedPlacementWidth)
+            .help(
+                model.selectedPlacementID == nil
+                    ? "请先选择一个签名"
+                    : model.canEditSelectedPlacementWidth
+                        ? "调整所选签名的宽度"
+                        : "当前页面无法容纳最小 0.5 cm 的签名宽度"
+            )
         }
         ToolbarItem(placement: .principal) {
             if let name = model.sourceURL?.lastPathComponent {
@@ -165,6 +200,25 @@ struct ContentView: View {
             }
         }
     }
+
+    private func editSelectedPlacementWidth() {
+        guard let placement = model.selectedPlacement,
+              let asset = model.asset(for: placement) else { return }
+        placementWidthEditor = PlacementWidthEditorRequest(
+            placementID: placement.id,
+            signatureName: asset.name,
+            initialCentimeters: SignatureSizing.centimeters(fromPoints: placement.rect.width),
+            maximumCentimeters: model.maximumPlacementWidthCentimeters(id: placement.id)
+        )
+    }
+}
+
+private struct PlacementWidthEditorRequest: Identifiable {
+    var id: UUID { placementID }
+    let placementID: UUID
+    let signatureName: String
+    let initialCentimeters: CGFloat
+    let maximumCentimeters: CGFloat?
 }
 
 private struct PageSidebar: View {
@@ -305,6 +359,7 @@ private struct PageFrameReporter: View {
 private struct SignatureSidebar: View {
     @EnvironmentObject private var model: DocumentModel
     @State private var assetPendingDeletion: SignatureAsset?
+    @State private var assetPendingWidthEdit: SignatureAsset?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -328,6 +383,9 @@ private struct SignatureSidebar: View {
                                             .frame(maxWidth: .infinity)
                                             .frame(height: 80)
                                         Text(asset.name).lineLimit(1)
+                                        Text("默认宽度 \(SignatureWidthText.string(from: asset.defaultWidthCentimeters)) cm")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(10)
@@ -355,6 +413,9 @@ private struct SignatureSidebar: View {
                                         model.addSignature(asset)
                                     }
                                     .disabled(model.document == nil)
+                                    Button("设置默认宽度…", systemImage: "ruler") {
+                                        assetPendingWidthEdit = asset
+                                    }
                                     Divider()
                                     Button("从签名库删除…", role: .destructive) {
                                         assetPendingDeletion = asset
@@ -373,6 +434,9 @@ private struct SignatureSidebar: View {
                                     model.addSignature(asset)
                                 }
                                 .disabled(model.document == nil)
+                                Button("设置默认宽度…") {
+                                    assetPendingWidthEdit = asset
+                                }
                                 Divider()
                                 Button("从签名库删除…", role: .destructive) {
                                     assetPendingDeletion = asset
@@ -405,6 +469,17 @@ private struct SignatureSidebar: View {
         } message: { asset in
             Text(deletionMessage(for: asset))
         }
+        .sheet(item: $assetPendingWidthEdit) { asset in
+            SignatureWidthEditorSheet(
+                title: "设置默认插入宽度",
+                signatureName: asset.name,
+                initialCentimeters: asset.defaultWidthCentimeters,
+                explanation: "以后插入这个签名时会使用该宽度；文档中已有的实例不会改变。",
+                actionTitle: "保存"
+            ) { centimeters in
+                model.updateDefaultWidth(for: asset, toCentimeters: centimeters)
+            }
+        }
     }
 
     private var deletionDialogPresented: Binding<Bool> {
@@ -428,6 +503,157 @@ private struct SignatureSidebar: View {
         } else {
             model.beginPlacingSignature(asset)
         }
+    }
+}
+
+private struct SignatureWidthEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let signatureName: String
+    let maximumCentimeters: CGFloat?
+    let explanation: String
+    let actionTitle: String
+    let onCommit: (CGFloat) -> Bool
+
+    @State private var widthText: String
+    @State private var validationMessage: String?
+    @FocusState private var widthIsFocused: Bool
+
+    init(
+        title: String,
+        signatureName: String,
+        initialCentimeters: CGFloat,
+        maximumCentimeters: CGFloat? = nil,
+        explanation: String,
+        actionTitle: String,
+        onCommit: @escaping (CGFloat) -> Bool
+    ) {
+        self.title = title
+        self.signatureName = signatureName
+        self.maximumCentimeters = maximumCentimeters
+        self.explanation = explanation
+        self.actionTitle = actionTitle
+        self.onCommit = onCommit
+        _widthText = State(initialValue: SignatureWidthText.string(from: initialCentimeters))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title)
+                .font(.title2)
+                .fontWeight(.semibold)
+            Text(signatureName)
+                .font(.headline)
+                .lineLimit(1)
+            Text(explanation)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let maximumCentimeters {
+                Text("当前可设置的最大宽度约为 \(SignatureWidthText.string(from: maximumCentimeters)) cm。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text("宽度")
+                TextField("3.6", text: $widthText)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 90)
+                    .focused($widthIsFocused)
+                    .onSubmit(commit)
+                Text("cm")
+            }
+
+            if let validationMessage {
+                Text(validationMessage)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(actionTitle, action: commit)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 390)
+        .onAppear {
+            DispatchQueue.main.async {
+                widthIsFocused = true
+            }
+        }
+    }
+
+    private func commit() {
+        guard let centimeters = SignatureWidthText.centimeters(from: widthText) else {
+            validationMessage = "请输入有效的宽度。"
+            return
+        }
+        guard centimeters >= SignatureSizing.minimumWidthCentimeters,
+              centimeters <= SignatureSizing.maximumWidthCentimeters else {
+            validationMessage = "宽度必须在 0.5 到 100 cm 之间。"
+            return
+        }
+        if let maximumCentimeters,
+           centimeters > maximumCentimeters
+            + SignatureSizing.widthComparisonToleranceCentimeters {
+            validationMessage = "当前可设置的最大宽度约为 \(SignatureWidthText.string(from: maximumCentimeters)) cm。"
+            return
+        }
+        validationMessage = nil
+        if onCommit(centimeters) {
+            dismiss()
+        } else {
+            validationMessage = "无法保存更改，请重试。"
+        }
+    }
+}
+
+enum SignatureWidthText {
+    static func string(from centimeters: CGFloat, locale: Locale = .current) -> String {
+        let formatter = formatter(locale: locale)
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 3
+        return formatter.string(from: NSNumber(value: Double(centimeters)))
+            ?? String(format: "%.3f", Double(centimeters))
+    }
+
+    static func centimeters(from text: String, locale: Locale = .current) -> CGFloat? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        for candidateLocale in [locale, Locale(identifier: "en_US_POSIX")] {
+            let formatter = formatter(locale: candidateLocale)
+
+            var valueObject: AnyObject?
+            let stringLength = (trimmed as NSString).length
+            var parsedRange = NSRange(location: 0, length: stringLength)
+            guard (try? formatter.getObjectValue(
+                &valueObject,
+                for: trimmed,
+                range: &parsedRange
+            )) != nil,
+            parsedRange == NSRange(location: 0, length: stringLength),
+            let number = valueObject as? NSNumber else { continue }
+            let value = number.doubleValue
+            guard value.isFinite, value > 0 else { continue }
+            return CGFloat(value)
+        }
+        return nil
+    }
+
+    private static func formatter(locale: Locale) -> NumberFormatter {
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = false
+        formatter.isLenient = false
+        return formatter
     }
 }
 
